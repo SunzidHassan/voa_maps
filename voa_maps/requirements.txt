@@ -1,0 +1,23 @@
+# Core Data & Math
+numpy
+pandas
+scipy
+networkx
+
+# Computer Vision & Image Processing
+opencv-python
+matplotlib
+scikit-image
+shapely
+
+# AI & Machine Learning
+torch
+torchvision
+torchaudio
+transformers
+sentence-transformers
+scikit-learn
+ultralytics
+
+# Simulation
+ai2thor

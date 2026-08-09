@@ -1,0 +1,29 @@
+{
+  "condition": "sound_only",
+  "scene": "FloorPlan301",
+  "target_items": [
+    "AlarmClock_b6b90d65"
+  ],
+  "run": 5,
+  "odor": null,
+  "sound": "an alarm clock ringing",
+  "modalities": "VA",
+  "nav_mode": "greedy",
+  "trigger_mode": "fused",
+  "entropy_frac": 0.7,
+  "team_size": 2,
+  "steps": 10,
+  "behavior_flag": "goal_navigation",
+  "terminated": true,
+  "source_x": -1.290244698524475,
+  "source_z": -0.48491889238357544,
+  "L0_map": 75.0,
+  "L0_posterior": [
+    5.105687849549003e-19,
+    3.758132052004749e-05,
+    0.987596926372783,
+    0.012365492305862657,
+    8.343969710150986e-13
+  ],
+  "L0_converged": true
+}
