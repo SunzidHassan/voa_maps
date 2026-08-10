@@ -5,7 +5,7 @@ import os
 import pandas as pd
 import numpy as np
 
-from voa_functions.utils import world_to_grid
+from .utils import world_to_grid
 
 # ==========================
 # Dirichlet Object Map  (config)
@@ -64,7 +64,7 @@ USE_CONF_AS_EVIDENCE = False                        # False = perfect YOLO (+1)
 FREE_FOV_DEG     = 90.0    # camera horizontal field of view
 FREE_RANGE_M     = 2.5     # only mark cells this close as reliably observed
 FREE_MIN_RANGE_M = 0.25    # skip the cell the robot stands in
-FREE_EVIDENCE    = 1.0     # weaker than a detection's 1.0, on purpose
+FREE_EVIDENCE    = 0.3     # weaker than a detection's 1.0, on purpose
 CLIP_NEGATIVE_SIM    = True                         # clip cosine sim at 0
 
 _SIM_CACHE = {}                                     # goal_phrase -> (K,) sim vector

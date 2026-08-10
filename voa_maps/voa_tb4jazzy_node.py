@@ -51,7 +51,8 @@ import cv2 as cv
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (qos_profile_sensor_data, QoSProfile, QoSDurabilityPolicy,
+                       QoSReliabilityPolicy, QoSHistoryPolicy)
 
 from geometry_msgs.msg import Twist, Vector3
 from sensor_msgs.msg import CompressedImage, LaserScan
@@ -65,7 +66,7 @@ from tf2_ros.transform_listener import TransformListener
 from ultralytics import YOLO
 
 from .voa_functions import visionFunction as vf
-from . import voa_TB4Jazzy_functions as tb4
+from . import voa_tb4jazzy_functions as tb4
 
 # ============================================================= CONFIG
 
@@ -86,6 +87,20 @@ CMD_VEL_TOPIC = '/cmd_vel'
 DOA_TOPIC = '/respeaker/doa'        # Vector3: x=deg, y=level dB, z=activity
 MAP_FRAME = 'map'
 BASE_FRAME = 'base_footprint'
+
+# nav2's map_server LATCHES /map: it publishes once at startup with
+# TRANSIENT_LOCAL durability. A default (VOLATILE) subscription is an
+# incompatible QoS match -- it is created without any error, `ros2 topic list`
+# shows the topic, and the callback simply never fires, because the message was
+# published before this node existed and VOLATILE subscribers are not offered
+# the cached sample. Every other subscriber on this robot (local_costmap,
+# global_costmap, amcl, rviz2) uses TRANSIENT_LOCAL for exactly this reason.
+MAP_QOS = QoSProfile(
+    depth=1,
+    history=QoSHistoryPolicy.KEEP_LAST,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 # --- OAK-D Pro ---
 CAM_HFOV_DEG = 66.0
@@ -133,7 +148,7 @@ class VAOTurtleBot4(Node):
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
-        self.declare_parameter('yolo_path', 'models/YOLO/best_100epochs.pt')
+        self.declare_parameter('yolo_path', 'voa_maps/models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
         self.declare_parameter('enable_audition', ENABLE_AUDITION)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
@@ -163,7 +178,8 @@ class VAOTurtleBot4(Node):
         self.doa_independent_frac = DOA_INDEPENDENT_FRAC
 
         stamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-        self.save_dir = gp('save_dir') or os.path.join(os.getcwd(), f'voa_run_{stamp}')
+        self.save_dir = gp('save_dir') or os.path.join(
+            os.getcwd(), f'voa_maps/save/TB4/voa_run_{stamp}')
         os.makedirs(self.save_dir, exist_ok=True)
         self.get_logger().info(f"modalities={self.modalities}  save_dir={self.save_dir}")
 
@@ -190,7 +206,7 @@ class VAOTurtleBot4(Node):
                                  qos_profile_sensor_data)
         self.create_subscription(Odometry, ODOM_TOPIC, self.odom_callback,
                                  qos_profile_sensor_data)
-        self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, 10)
+        self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, MAP_QOS)
         if self.use_A:
             self.create_subscription(Vector3, DOA_TOPIC, self.doa_callback, 10)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -368,6 +384,28 @@ class VAOTurtleBot4(Node):
                 f"grid {self.free_mask.shape[0]}x{self.free_mask.shape[1]} "
                 f"({self.free_mask.size} cells, {int(self.free_mask.sum())} free), "
                 f"H_max {self.H_max:.2f} bits")
+            self.state = 'WAIT_SENSORS'
+            return
+
+        if self.state == 'WAIT_SENSORS':
+            # Block until RGB and depth have BOTH arrived. Without this the
+            # first steps run with visionBranch returning nothing, the object
+            # map stays at its prior, and the run looks like vision is broken
+            # when it is really just not connected yet.
+            missing = []
+            if self.latest_rgb_image is None:
+                missing.append(RGB_TOPIC)
+            if self.latest_depth_image is None:
+                missing.append(DEPTH_TOPIC)
+            if missing:
+                self.get_logger().warn(
+                    f"waiting for camera: no data yet on {', '.join(missing)}",
+                    throttle_duration_sec=5.0)
+                return
+            self.get_logger().info(
+                f"camera OK -- RGB {self.latest_rgb_shape[1]}x{self.latest_rgb_shape[0]}, "
+                f"depth {self.latest_depth_image.shape[1]}x{self.latest_depth_image.shape[0]} "
+                f"({self.latest_depth_image.dtype})")
             self.state = 'BASELINE' if self.use_O else 'SENSE'
             return
 
@@ -388,15 +426,17 @@ class VAOTurtleBot4(Node):
         if self.state == 'SENSE':
             if not self.update_pose(self.latest_rgb_stamp):
                 return
-            n_det = n_rej = 0
+            dets, n_rej = [], 0
             if self.use_V:
-                annotated, n_det, n_rej = tb4.visionBranch(self.yoloModel, self)
+                annotated, dets, n_rej = tb4.visionBranch(self.yoloModel, self)
                 self.n_depth_rejected += n_rej
                 if annotated is not None:
                     cv.imwrite(os.path.join(self.save_dir,
                                             f"yolo_{self.step:03d}.jpg"), annotated)
             counts = tb4.olfactionBranch(self) if self.use_O else None
-            self._pending = dict(n_det=n_det, n_rej=n_rej, counts=counts, n_doa=0,
+            self.report_sensing(dets, n_rej, counts)
+            self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts,
+                                 n_doa=0, dets=dets,
                                  rx=self.robot_map_posX, ry=self.robot_map_posY)
 
             if self.use_A:
@@ -456,7 +496,7 @@ class VAOTurtleBot4(Node):
                     self.last_sense = now
                     if self.update_pose(self.latest_rgb_stamp):
                         if self.use_V:
-                            _, _, rej = tb4.visionBranch(self.yoloModel, self)
+                            _, _d, rej = tb4.visionBranch(self.yoloModel, self)
                             self.n_depth_rejected += rej
                         if self.use_O:
                             tb4.olfactionBranch(self)
@@ -477,6 +517,52 @@ class VAOTurtleBot4(Node):
             self.state = 'DONE'
             return
 
+    # ---------------------------------------------------------------- reporting
+    def report_sensing(self, dets, n_rej, counts):
+        """Print what the sensors actually returned this step.
+
+        The similarity column is the one to watch: a detection with a high
+        confidence but a near-zero sim contributes almost nothing to the visual
+        belief, because the semantic map is the class posterior projected onto
+        exactly these numbers. A run where every sim is ~0 means the goal
+        phrase and the class names are not meeting, and vision is effectively
+        just marking free space.
+        """
+        yaw = tb4.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
+        self.get_logger().info(
+            f"--- step {self.step} @ ({self.robot_map_posX:.2f}, "
+            f"{self.robot_map_posY:.2f}) yaw {math.degrees(yaw):.0f} deg ---")
+
+        if self.use_O:
+            if counts is None:
+                self.get_logger().info(
+                    f"  olfaction  raw {self.olfactionChemicalConc:.1f} counts, "
+                    f"baseline not set yet")
+            else:
+                self.get_logger().info(
+                    f"  olfaction  raw {self.olfactionChemicalConc:.1f} - "
+                    f"baseline {self.mq3_baseline:.1f} = {counts:.1f} counts   "
+                    f"wind {self.olfactionWindSpeed:.2f} m/s @ "
+                    f"{self.olfactionWindDirection:.0f} deg")
+
+        if not self.use_V:
+            return
+        if not dets:
+            self.get_logger().info(
+                f"  vision     no usable detections"
+                f"{f' ({n_rej} rejected past {DEPTH_TRUST_MAX_M} m)' if n_rej else ''}")
+            return
+
+        self.get_logger().info(
+            f"  vision     {len(dets)} detection(s)"
+            f"{f', {n_rej} rejected past {DEPTH_TRUST_MAX_M} m' if n_rej else ''}")
+        self.get_logger().info(
+            f"      {'class':<16}{'conf':>6}{'depth':>8}{'map x':>9}{'map y':>9}{'sim':>8}")
+        for d in dets:
+            self.get_logger().info(
+                f"      {d['class_name'][:15]:<16}{d['conf']:>6.2f}"
+                f"{d['depth']:>7.2f}m{d['x']:>9.2f}{d['y']:>9.2f}{d['sim']:>8.3f}")
+
     # ---------------------------------------------------------------- output
     def log_step(self, p, trig):
         yaw = tb4.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
@@ -485,6 +571,10 @@ class VAOTurtleBot4(Node):
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
+            best_detection=(max(p.get('dets') or [], key=lambda d: d['sim'],
+                                default={}).get('class_name')),
+            best_sim=(max((d['sim'] for d in (p.get('dets') or [])),
+                          default=float('nan'))),
             n_doa_samples=p['n_doa'],
             chemicalConc=p['counts'],
             wind_direction=self.olfactionWindDirection,

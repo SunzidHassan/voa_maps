@@ -171,7 +171,10 @@ def coord23D(x, y, w, h, node):
 def visionBranch(model, node, confThr=0.3):
     """Run YOLO, project detections into the map, update the Dirichlet object map.
 
-    Returns (annotated_frame, n_used, n_rejected).
+    Returns (annotated_frame, detections, n_rejected) where `detections` is a
+    list of dicts: class_name, conf, depth, x, y, sim. `sim` is the cosine
+    similarity between that class name and the goal phrase -- the number that
+    decides how much the detection actually contributes to the visual belief.
 
     Two behaviours worth knowing:
 
@@ -189,12 +192,29 @@ def visionBranch(model, node, confThr=0.3):
     results = model(node.latest_rgb_image, verbose=False, conf=confThr)
     annotated = results[0].plot()
 
-    det_cells, n_used, n_rejected = [], 0, 0
+    # Per-class similarity against the goal phrase. Cached inside
+    # class_goal_similarity, so this costs one SBERT encode for the whole run.
+    sim_vec = None
+    try:
+        if getattr(node, 'goal_phrase', None):
+            sim_vec = vf.class_goal_similarity(node.goal_phrase)
+    except Exception as e:
+        node.get_logger().warn(f"similarity lookup failed: {e}")
+
+    det_cells, detections, n_rejected, unknown = [], [], 0, set()
     for box in results[0].boxes:
         confidence = float(box.conf[0].item())
         if confidence < confThr:
             continue
         className = model.names[int(box.cls[0].item())]
+        # A class the detector reports but the object map does not know falls
+        # straight through update_object_map's CLS_IDX lookup and contributes
+        # NOTHING, silently. That is exactly what happens when yolo_path points
+        # at a stock COCO checkpoint while LAB_CLASSES lists the fine-tuned
+        # lab classes, so it is worth naming rather than swallowing.
+        if className not in vf.CLS_IDX:
+            unknown.add(className)
+            continue
         x, y, w, h = [float(v) for v in box.xywh[0]]
         x_glob, y_glob, z_glob, d = coord23D(int(x), int(y), int(w), int(h), node)
         if d <= 0.0:
@@ -208,7 +228,11 @@ def visionBranch(model, node, confThr=0.3):
         det_cells.append(tuple(int(v) for v in
                                world_to_grid(x_glob, y_glob,
                                              node.x_points, node.z_points)))
-        n_used += 1
+        detections.append(dict(
+            class_name=className, conf=confidence, depth=d,
+            x=x_glob, y=y_glob,
+            sim=(float(sim_vec[vf.CLS_IDX[className]])
+                 if sim_vec is not None else float('nan'))))
 
         cv.putText(annotated, f"{d:.2f}m ({x_glob:.2f},{y_glob:.2f})",
                    (int(x) - 20, int(y) + 20), cv.FONT_HERSHEY_SIMPLEX, 0.5,
@@ -221,7 +245,12 @@ def visionBranch(model, node, confThr=0.3):
                          detected_cells=det_cells,
                          fov_deg=node.cam_hfov_deg,
                          evidence=node.free_evidence)
-    return annotated, n_used, n_rejected
+    if unknown:
+        node.get_logger().warn(
+            f"detector reported {sorted(unknown)} which are NOT in the object "
+            f"map classes {vf.CLASSES[:-1]} -- these contribute nothing. "
+            f"Check yolo_path matches LAB_CLASSES.")
+    return annotated, detections, n_rejected
 
 
 # ============================================================= OLFACTION
