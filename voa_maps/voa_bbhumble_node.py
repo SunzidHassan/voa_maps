@@ -1,42 +1,55 @@
 #!/usr/bin/env python3
 """
-voa_TB4Jazzy_node.py  --  VAO source localisation on TurtleBot4 Pro (ROS2 Jazzy).
+voa_BBHumble_node.py  --  VAO source localisation on Robuddy (ROS2 Humble).
 
-    ros2 run voa_maps tb4_node
-    ros2 run voa_maps tb4_node --ros-args -p goal_phrase:="rotten food smell"
+    ros2 run voa_maps bb_node
+    ros2 run voa_maps bb_node --ros-args -p goal_phrase:="rotten food smell"
 
-Control only: ROS interfaces, callbacks, and the state machine. All the sensor
-maths lives in rosFunctions.py (shared with Robuddy), and inference lives in
+Sibling of voa_TB4Jazzy_node.py. Control only: ROS interfaces, callbacks and the
+state machine. Sensor maths is in rosFunctions.py (shared with the TurtleBot4); inference is in
 voa_functions/ unchanged from the AI2-THOR runs.
 
-Topics, frames and the compressedDepth header offset are taken from
-turtlebot_subpub_01. Note this robot publishes map -> base_footprint, not
-base_link.
+Interfaces taken from bluebotone_robuddy_09_controller.py:
+    ReSpeaker XVF3800  VID 0x2886  PID 0x001A, read over a USB control
+                       transfer (PARAMETERS['DOA_VALUE'] -> resid 20, cmd 18)
+    nav2               navigate_to_pose and spin action servers
+    /cmd_vel           Twist
+    base frame         base_link
 
-CYCLE
------
-    SENSE -> FUSE -> NAVIGATE -> SENSE ...
+WHAT DIFFERS FROM THE TURTLEBOT4 NODE
+-------------------------------------
+  * modalities are VAO, not VO -- a mic array is actually fitted
+  * DOA arrives by USB polling in a background thread, not on a ROS topic
+  * /mq3/raw is a bare Float32: no wind, so the plume runs at U=0
+  * the XVF3800's USB control interface reports no level, so the level is
+    taken from the RMS of its ALSA capture stream instead -- that feeds the L0
+    range hypothesis, which turns a bearing ray into a located spot
 
-nav2 goals are asynchronous, so vision and olfaction keep sampling at
-SENSE_PERIOD_S while the base drives. There is no LISTEN phase because this
-robot has no microphone -- see voa_BBHumble_node, where audition requires
-stopping so the array does not hear the drive motors.
+WHY THE ROBOT STOPS TO LISTEN
+-----------------------------
+A moving base is the loudest thing in the room from the microphone's point of
+view, and drive motors sit right in the band the array uses for DOA. The LISTEN
+phase halts the base, waits for spin-down, and only then opens the microphone.
+A velocity gate on /odom independently discards any sample collected while the
+base is still moving, so ego-noise never reaches the belief at all.
 
 BEFORE THE FIRST RUN
 --------------------
 1. Start this node BEFORE opening the odour source. The first
    MQ3_BASELINE_SAMPLES readings are taken as clean air; if the plume is
    already present the baseline absorbs it and olfaction contributes nothing.
-2. Confirm map -> base_footprint exists, i.e. nav2 is running with a map and
-   not just odometry. A belief accumulated in odom smears as the run goes on.
-3. This robot is VO by construction: no microphone array, so no auditory
-   branch and nothing to calibrate.
+2. Confirm map -> base_link exists, i.e. nav2 is running with a map. The
+   assistant controller reads odom -> base_link, which drifts; a belief
+   accumulated in odom smears as the run goes on.
+3. Calibrate DOA_OFFSET_DEG with the source dead ahead. DOA_CCW=False is
+   already verified for this array -- see rosFunctions.doa_to_alg_relative.
 """
 
 import os
 import json
 import math
 import time
+import struct
 import threading
 from datetime import datetime
 
@@ -50,7 +63,8 @@ from rclpy.action import ActionClient
 from rclpy.qos import (qos_profile_sensor_data, QoSProfile, QoSDurabilityPolicy,
                        QoSReliabilityPolicy, QoSHistoryPolicy)
 
-from geometry_msgs.msg import Twist, Vector3
+from std_msgs.msg import Float32
+from geometry_msgs.msg import Twist
 from sensor_msgs.msg import CompressedImage, LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry
 from nav2_msgs.action import NavigateToPose
@@ -66,39 +80,26 @@ from . import rosFunctions as rf
 
 # ============================================================= CONFIG
 
-# The object map's class axis is taken FROM THE LOADED MODEL by default, so it
-# can never drift out of sync with what the detector actually reports. Set this
-# to a list only if you want to restrict the axis to a subset.
-#
-# Leaving it None works for both cases: a stock COCO checkpoint contributes its
-# 80 classes, a fine-tuned checkpoint contributes its own. Hardcoding a list
-# that disagrees with model.names makes every detection fall through the
-# CLS_IDX lookup and the object map silently never moves.
+# Class axis comes from the loaded model so it can never drift out of sync with
+# what the detector reports. Set to a list only to restrict it to a subset.
 OBJECT_CLASSES = None
 
-# Kept for reference -- the fine-tuned lab checkpoint's classes.
-LAB_CLASSES = ['Cardboard box', 'Coke can', 'First aid box',
-               'Humidifier', 'Humidifier box', 'Water bottle']
-
 # --- topics / frames ---
-RGB_TOPIC = '/oakd/rgb/image_raw/compressed'
-DEPTH_TOPIC = '/oakd/stereo/image_raw/compressedDepth'
+RGB_TOPIC = '/oak/rgb/image_raw/compressed'
+DEPTH_TOPIC = '/oak/stereo/image_raw/compressedDepth'
 DEPTH_HEADER_BYTES = 12
-OLFACTION_TOPIC = '/olfaction'      # Vector3: x=wind dir, y=wind speed, z=counts
+MQ3_TOPIC = '/mq3/raw'              # Float32, raw counts
 SCAN_TOPIC = '/scan'
 ODOM_TOPIC = '/odom'
 MAP_TOPIC = '/map'
 CMD_VEL_TOPIC = '/cmd_vel'
 MAP_FRAME = 'map'
-BASE_FRAME = 'base_footprint'
+BASE_FRAME = 'base_link'
 
-# nav2's map_server LATCHES /map: it publishes once at startup with
-# TRANSIENT_LOCAL durability. A default (VOLATILE) subscription is an
-# incompatible QoS match -- it is created without any error, `ros2 topic list`
-# shows the topic, and the callback simply never fires, because the message was
-# published before this node existed and VOLATILE subscribers are not offered
-# the cached sample. Every other subscriber on this robot (local_costmap,
-# global_costmap, amcl, rviz2) uses TRANSIENT_LOCAL for exactly this reason.
+# nav2's map_server LATCHES /map with TRANSIENT_LOCAL durability. A default
+# (VOLATILE) subscription is an incompatible QoS match: it is created without
+# error, the topic shows in `ros2 topic list`, and the callback simply never
+# fires because the message was published before this node existed.
 MAP_QOS = QoSProfile(
     depth=1,
     history=QoSHistoryPolicy.KEEP_LAST,
@@ -106,9 +107,18 @@ MAP_QOS = QoSProfile(
     durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
 )
 
-# --- OAK-D Pro ---
-CAM_HFOV_DEG = 66.0
-CAM_VFOV_DEG = 54.0
+# --- ReSpeaker XVF3800 (from bluebotone_robuddy_09_controller) ---
+RESPEAKER_VID = 0x2886
+RESPEAKER_PID = 0x001A
+RESPEAKER_PARAMS = {"DOA_VALUE": (20, 18, 4, "ro", "uint16")}
+RESPEAKER_TIMEOUT_MS = 1000
+DOA_POLL_HZ = 20.0
+
+# --- OAK-D S2 ---
+# Autofocus hunts on flat, low-texture surfaces, which shows up as a detection
+# whose depth jumps frame to frame. Lock focus once at startup if you see that.
+CAM_HFOV_DEG = 69.0
+CAM_VFOV_DEG = 55.0
 CAM_HEIGHT_M = 0.25
 DEPTH_TRUST_MAX_M = 2.0
 
@@ -116,39 +126,110 @@ DEPTH_TRUST_MAX_M = 2.0
 GRID_STEP = 0.25
 NAV_STEP_M = 0.75
 NAV_TIMEOUT_S = 45.0
+SETTLE_S = 1.5
 SENSE_PERIOD_S = 1.0
+LISTEN_S = 3.0
+EGO_NOISE_VEL = 0.02
 
 # --- audition ---
-# The TurtleBot4 Pro has NO microphone array, so this robot is VO by
-# construction, not by configuration. There is no DOA topic to subscribe to
-# and no calibration to get wrong. If a mic array is ever fitted, copy the
-# DOA plumbing from voa_BBHumble_node rather than reintroducing a flag here.
+ENABLE_AUDITION = True
+DOA_OFFSET_DEG = 0.0        # array zero vs robot forward; calibrate once
+DOA_CCW = False             # VERIFIED for this array -- see the functions file
+DOA_SIGMA_DEG = 15.0
+DOA_BURST_BIAS_DEG = 10.0
+DOA_INDEPENDENT_FRAC = 0.2
+DOA_REQUIRE_SPEECH = False  # the XVF3800 flag is tuned for speech, not alarms
 
-# --- sensor noise, already inflated (see SIGMA_INFLATION in fusion_controller) ---
+# --- sound level, from the ALSA capture stream ---
+# DOA_VALUE carries no level, so the level comes from the RMS of the audio the
+# array is already streaming. That feeds the L0 range hypothesis, which is what
+# turns a bearing RAY into a located SPOT.
+#
+# AGC IS THE RISK. If the XVF3800 is applying automatic gain control, a distant
+# quiet source is amplified toward the same RMS as a near loud one and the
+# range information is destroyed -- the hypothesis will then peg at a grid edge
+# and the run_meta L0_pegged flag will say so. Verify by walking the robot
+# toward a steady source and checking level_db rises monotonically; if it does
+# not, set ENABLE_SOUND_LEVEL = False and accept bearing-only triangulation.
+ENABLE_SOUND_LEVEL = True
+AUDIO_DEVICE = None         # None = default ALSA input; set the index if needed
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_CHANNELS = 2
+AUDIO_BLOCK = 1600          # 100 ms
+LEVEL_REF_RMS = 1.0         # arbitrary: only level DIFFERENCES are identifiable
+
+# --- sensor noise, already inflated ---
 OLF_SIGMA_LOG = 0.75
 SND_SIGMA_DB = 7.5
 MQ3_BASELINE_SAMPLES = 40
 
-# --- source-strength hypotheses, tracked rather than assumed ---
 Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(3, np.log10(5000), 5))
 
 # --- fusion / termination ---
-W_VISION, W_OLFACT = 1.0, 0.5
-W_SOUND = 0.0              # unused: no microphone array
+W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
 ENTROPY_FRAC = 0.7
 MAX_STEPS = 40
 FREE_EVIDENCE = 3.0
 
 
-class VAOTurtleBot4(Node):
+class ReSpeaker:
+    """Vendor control-transfer access to the XVF3800.
+
+    Lifted from bluebotone_robuddy_09_controller so both nodes talk to the
+    device identically. No interface is claimed, so this coexists with ALSA's
+    hold on the audio interfaces.
+    """
+
+    def __init__(self, dev):
+        self.dev = dev
+        self._lock = threading.Lock()
+
+    def read(self, name):
+        import usb.util
+        resid, cmd, length_bytes, _acc, typ = RESPEAKER_PARAMS[name]
+        cmdid = 0x80 | cmd
+        length = length_bytes + 1                  # +1 for the leading status byte
+        with self._lock:
+            resp = self.dev.ctrl_transfer(
+                usb.util.CTRL_IN | usb.util.CTRL_TYPE_VENDOR
+                | usb.util.CTRL_RECIPIENT_DEVICE,
+                0, cmdid, resid, length, RESPEAKER_TIMEOUT_MS)
+        b = resp.tobytes()
+        if typ == "uint16":
+            n = length_bytes // 2
+            return list(struct.unpack("<" + "H" * n, b[1:1 + n * 2]))
+        return list(resp)
+
+    def read_doa(self):
+        """(doa_degrees:int, is_speech:bool) or (None, False)."""
+        try:
+            words = self.read("DOA_VALUE")
+            if not words or len(words) < 2:
+                return None, False
+            return int(words[0]), bool(words[1])
+        except Exception:
+            return None, False
+
+    @staticmethod
+    def open():
+        try:
+            import usb.core
+            dev = usb.core.find(idVendor=RESPEAKER_VID, idProduct=RESPEAKER_PID)
+            return ReSpeaker(dev) if dev is not None else None
+        except Exception:
+            return None
+
+
+class VAORobuddy(Node):
 
     def __init__(self):
-        super().__init__('voa_tb4_node')
+        super().__init__('voa_bb_node')
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
         self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
+        self.declare_parameter('enable_audition', ENABLE_AUDITION)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
         gp = lambda n: self.get_parameter(n).value
 
@@ -156,10 +237,7 @@ class VAOTurtleBot4(Node):
         self.sound_phrase = gp('sound_phrase')
         self.entropy_frac = float(gp('entropy_frac'))
         self.use_V, self.use_O = True, True
-        self.use_A = False               # no microphone array on this platform
-        self.modalities = ''.join(c for c, on in
-                                  (('V', self.use_V), ('A', self.use_A),
-                                   ('O', self.use_O)) if on)
+        self.use_A = bool(gp('enable_audition'))
 
         # --- config exposed to the helpers via node state ---
         self.cam_hfov_deg, self.cam_vfov_deg = CAM_HFOV_DEG, CAM_VFOV_DEG
@@ -167,16 +245,29 @@ class VAOTurtleBot4(Node):
         self.depth_trust_max_m = DEPTH_TRUST_MAX_M
         self.free_evidence = FREE_EVIDENCE
         self.nav_step_m = NAV_STEP_M
-        self.olf_sigma_log, self.snd_sigma_db = OLF_SIGMA_LOG, SND_SIGMA_DB
+        self.olf_sigma_log = OLF_SIGMA_LOG
         self.q_s_hypotheses = Q_S_HYPOTHESES
+        # Wide, because an RMS-derived dB has an arbitrary offset: the grid has
+        # to span wherever the uncalibrated scale happens to land.
+        self.l0_hypotheses = tuple(np.linspace(20.0, 100.0, 5))
+        self.snd_sigma_db = SND_SIGMA_DB
         self.w_vision, self.w_olfact, self.w_sound = W_VISION, W_OLFACT, W_SOUND
-        self.has_sound_level = False     # no array, so no level and no L0 tracker
+        self.doa_offset_deg, self.doa_ccw = DOA_OFFSET_DEG, DOA_CCW
+        # Platform capability flags read by rosFunctions.
+        # The XVF3800's USB control interface exposes only DOA_VALUE = (angle,
+        # vad_flag) -- no level. But the array is also an ALSA capture device,
+        # and the RMS of that stream IS a level. Absolute calibration does not
+        # matter here: L0 is tracked as an unknown, so only DIFFERENCES between
+        # positions are identifiable and any constant offset cancels.
+        self.has_sound_level = ENABLE_SOUND_LEVEL
+        self.doa_sigma_deg = DOA_SIGMA_DEG
+        self.doa_burst_bias_deg = DOA_BURST_BIAS_DEG
+        self.doa_independent_frac = DOA_INDEPENDENT_FRAC
 
         stamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
         self.save_dir = gp('save_dir') or os.path.join(
-            os.getcwd(), f'voa_maps/save/TB4/voa_run_{stamp}')
+            os.getcwd(), f'voa_maps/save/bb/voa_run_{stamp}')
         os.makedirs(self.save_dir, exist_ok=True)
-        self.get_logger().info(f"modalities={self.modalities}  save_dir={self.save_dir}")
 
         try:
             self.yoloModel = YOLO(gp('yolo_path'))
@@ -185,14 +276,26 @@ class VAOTurtleBot4(Node):
             self.get_logger().error(f"YOLO load failed: {e}")
             raise
 
-        # Derive the class axis from the model unless explicitly overridden.
-        # Done AFTER loading so model.names is available.
         classes = OBJECT_CLASSES or [self.yoloModel.names[i]
                                      for i in sorted(self.yoloModel.names)]
         vf.configure_classes(classes)
         self.get_logger().info(
             f"object-map classes ({len(classes)} from the detector): "
             f"{classes if len(classes) <= 12 else classes[:12] + ['...']}")
+
+        # --- ReSpeaker: opened before announcing modalities, since a missing
+        #     device downgrades the run from VAO to VO ---
+        self.respeaker = ReSpeaker.open() if self.use_A else None
+        if self.use_A and self.respeaker is None:
+            self.get_logger().warn(
+                f"no XVF3800 at VID {RESPEAKER_VID:#06x} PID {RESPEAKER_PID:#06x}; "
+                f"auditory branch disabled")
+            self.use_A = False
+        self.modalities = ''.join(c for c, on in
+                                  (('V', self.use_V), ('A', self.use_A),
+                                   ('O', self.use_O)) if on)
+        self.get_logger().info(
+            f"modalities={self.modalities}  save_dir={self.save_dir}")
 
         # --- ROS interfaces ---
         self.tf_buffer = Buffer()
@@ -202,15 +305,16 @@ class VAOTurtleBot4(Node):
                                  self.image_callback, qos_profile_sensor_data)
         self.create_subscription(CompressedImage, DEPTH_TOPIC,
                                  self.depth_callback, qos_profile_sensor_data)
-        self.create_subscription(Vector3, OLFACTION_TOPIC, self.olfactory_callback, 10)
+        self.create_subscription(Float32, MQ3_TOPIC, self.mq3_callback, 10)
         self.create_subscription(LaserScan, SCAN_TOPIC, self.laser_callback,
                                  qos_profile_sensor_data)
         self.create_subscription(Odometry, ODOM_TOPIC, self.odom_callback,
                                  qos_profile_sensor_data)
-        self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, MAP_QOS)
+        self.create_subscription(OccupancyGrid, MAP_TOPIC,
+                                 self.map_callback, MAP_QOS)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
-        # --- sensor state (names match sosl_functions expectations) ---
+        # --- sensor state ---
         self.latest_rgb_image = None
         self.latest_rgb_shape = (0, 0, 0)
         self.latest_rgb_stamp = None
@@ -221,14 +325,21 @@ class VAOTurtleBot4(Node):
         self.robot_map_posY = 0.0
         self.robot_map_angZ = 0.0
         self.robot_map_angW = 1.0
-        self.wind_direction = 0.0
-        self.wind_speed = 0.0
         self.mq3_counts = 0.0
         self.have_olfaction = False
         self.mq3_baseline = None
         self._baseline_buf = []
         self.lin_vel = 0.0
         self.ang_vel = 0.0
+
+        self.doa_lock = threading.Lock()
+        self.doa_burst = []
+        self.listening = False
+        self._level_lock = threading.Lock()
+        self._level_db = None
+        self._audio_stream = None
+        self._stop_evt = threading.Event()
+        self._doa_thread = None
 
         # --- belief state ---
         self.grid_ready = False
@@ -249,8 +360,16 @@ class VAOTurtleBot4(Node):
         self.t0 = time.time()
         self.nav_active = False
         self.nav_deadline = 0.0
+        self.phase_until = 0.0
+        self.listen_from = 0.0
         self.last_sense = 0.0
         self._pending = {}
+
+        if self.use_A:
+            if ENABLE_SOUND_LEVEL:
+                self._start_audio()
+            self._doa_thread = threading.Thread(target=self._doa_loop, daemon=True)
+            self._doa_thread.start()
 
         self.create_timer(0.1, self.control_callback)
 
@@ -281,21 +400,92 @@ class VAOTurtleBot4(Node):
     def map_callback(self, msg):
         self.map_msg = msg
 
-    def olfactory_callback(self, msg):
-        # x = wind direction, y = wind speed, z = chemical concentration
-        self.wind_direction = float(msg.x)
-        self.wind_speed = float(msg.y)
-        self.mq3_counts = float(msg.z)
+    def mq3_callback(self, msg):
+        self.mq3_counts = float(msg.data)
         self.have_olfaction = True
+
+    # ---------------------------------------------------------------- audio level
+    def _start_audio(self):
+        """Open the array's ALSA capture stream purely to measure RMS.
+
+        No interface is claimed on the USB control endpoint, so this coexists
+        with the DOA control transfers -- the same arrangement the assistant
+        controller uses.
+        """
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            self.get_logger().warn(
+                f"sounddevice unavailable ({e}); sound level disabled, "
+                f"audition will be bearing-only")
+            self.has_sound_level = False
+            return
+        try:
+            self._audio_stream = sd.InputStream(
+                device=AUDIO_DEVICE, samplerate=AUDIO_SAMPLE_RATE,
+                channels=AUDIO_CHANNELS, dtype='int16',
+                blocksize=AUDIO_BLOCK, callback=self._audio_callback)
+            self._audio_stream.start()
+            self.get_logger().info(
+                f"audio level stream open ({AUDIO_SAMPLE_RATE} Hz, "
+                f"{AUDIO_CHANNELS} ch) -- L0 range hypothesis active")
+        except Exception as e:
+            self.get_logger().warn(
+                f"could not open audio stream ({e}); sound level disabled, "
+                f"audition will be bearing-only")
+            self.has_sound_level = False
+            self._audio_stream = None
+
+    def _audio_callback(self, indata, frames, t, status):
+        """RMS of the block, in dB on an arbitrary reference.
+
+        The reference is arbitrary on purpose: L0 is a tracked unknown, so a
+        constant offset cancels in the position-to-position differences that
+        actually carry the range information.
+        """
+        try:
+            x = np.asarray(indata, dtype=np.float64)
+            rms = float(np.sqrt(np.mean(x * x)))
+            if rms > 0.0:
+                with self._level_lock:
+                    self._level_db = 20.0 * math.log10(rms / LEVEL_REF_RMS)
+        except Exception:
+            pass
+
+    def _current_level_db(self):
+        with self._level_lock:
+            return self._level_db
+
+    # ---------------------------------------------------------------- DOA thread
+    def _doa_loop(self):
+        """Poll the XVF3800 over USB and collect samples only while stationary.
+
+        Gated here rather than filtered downstream, so ego-noise never reaches
+        the belief. The velocity check catches residual motion during the
+        settle window and anything nav2 issues unexpectedly.
+        """
+        period = 1.0 / DOA_POLL_HZ
+        while not self._stop_evt.is_set():
+            if self.listening and self.lin_vel <= EGO_NOISE_VEL \
+                    and self.ang_vel <= EGO_NOISE_VEL:
+                angle, is_speech = self.respeaker.read_doa()
+                if angle is not None and (is_speech or not DOA_REQUIRE_SPEECH):
+                    # Pair each bearing with the level measured at the same
+                    # moment. rosFunctions.auditionBranch accepts either a bare
+                    # angle or an (angle, level) tuple.
+                    lvl = self._current_level_db() if self.has_sound_level else None
+                    with self.doa_lock:
+                        self.doa_burst.append((float(angle), lvl))
+            time.sleep(period)
 
     # ---------------------------------------------------------------- pose
     def update_pose(self, stamp=None):
         """Refresh robot_map_* from TF. Returns True when a pose is available.
 
-        With a stamp, the transform is looked up AT THAT TIME. A camera frame
-        processed while nav2 is still driving was captured at a pose the robot
-        has already left; using the latest transform instead projects every
-        detection into the wrong cell.
+        With a stamp the transform is looked up AT THAT TIME: a camera frame
+        processed while nav2 is driving was captured at a pose the robot has
+        already left, and using the latest transform projects every detection
+        into the wrong cell.
         """
         try:
             when = rclpy.time.Time() if stamp is None else rclpy.time.Time.from_msg(stamp)
@@ -367,10 +557,6 @@ class VAOTurtleBot4(Node):
             return
 
         if self.state == 'WAIT_SENSORS':
-            # Block until RGB and depth have BOTH arrived. Without this the
-            # first steps run with visionBranch returning nothing, the object
-            # map stays at its prior, and the run looks like vision is broken
-            # when it is really just not connected yet.
             missing = []
             if self.latest_rgb_image is None:
                 missing.append(RGB_TOPIC)
@@ -383,14 +569,14 @@ class VAOTurtleBot4(Node):
                 return
             self.get_logger().info(
                 f"camera OK -- RGB {self.latest_rgb_shape[1]}x{self.latest_rgb_shape[0]}, "
-                f"depth {self.latest_depth_image.shape[1]}x{self.latest_depth_image.shape[0]} "
-                f"({self.latest_depth_image.dtype})")
+                f"depth {self.latest_depth_image.shape[1]}x"
+                f"{self.latest_depth_image.shape[0]} ({self.latest_depth_image.dtype})")
             self.state = 'BASELINE' if self.use_O else 'SENSE'
             return
 
         if self.state == 'BASELINE':
             if not self.have_olfaction:
-                self.get_logger().info(f"waiting for {OLFACTION_TOPIC}...",
+                self.get_logger().info(f"waiting for {MQ3_TOPIC}...",
                                        throttle_duration_sec=5.0)
                 return
             self._baseline_buf.append(self.mq3_counts)
@@ -417,9 +603,37 @@ class VAOTurtleBot4(Node):
             self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts,
                                  n_doa=0, dets=dets,
                                  rx=self.robot_map_posX, ry=self.robot_map_posY)
-            self.state = 'FUSE'
+
+            if self.use_A:
+                self.halt()
+                self.listening = False       # stays shut until spin-down
+                self.listen_from = now + SETTLE_S
+                self.phase_until = now + SETTLE_S + LISTEN_S
+                self.state = 'LISTEN'
+            else:
+                self.state = 'FUSE'
             return
 
+        if self.state == 'LISTEN':
+            if now >= self.listen_from:
+                self.listening = True
+            if now < self.phase_until:
+                self.halt()
+                return
+            self.listening = False
+            n = rf.auditionBranch(self)
+            self._pending['n_doa'] = n
+            lvl = self._current_level_db()
+            self.get_logger().info(
+                f"  audition   {n} DOA samples over {LISTEN_S:.1f} s while stationary"
+                + (f", level {lvl:.1f} dB" if lvl is not None else
+                   ", bearing-only (no level)"))
+            if self.sndHyp is not None and self.sndHyp.at_endpoint():
+                self.get_logger().warn(
+                    "L0 posterior pegged at a grid edge -- either the level scale "
+                    "is outside l0_hypotheses, or AGC is flattening it")
+            self.state = 'FUSE'
+            return
 
         if self.state == 'FUSE':
             trig = rf.update_belief(self)
@@ -440,8 +654,7 @@ class VAOTurtleBot4(Node):
                 self.get_logger().info(
                     f"{why}; peak is {rf.peak_object_name(self)} at "
                     f"({tx:.2f}, {tz:.2f}); driving there and terminating")
-                self.send_nav_goal(tx, tz,
-                                   math.atan2(tz - p['ry'], tx - p['rx']))
+                self.send_nav_goal(tx, tz, math.atan2(tz - p['ry'], tx - p['rx']))
                 self.state = 'FINISH'
                 return
 
@@ -482,12 +695,10 @@ class VAOTurtleBot4(Node):
     def report_sensing(self, dets, n_rej, counts):
         """Print what the sensors actually returned this step.
 
-        The similarity column is the one to watch: a detection with a high
-        confidence but a near-zero sim contributes almost nothing to the visual
+        The similarity column is the one to watch: a detection with high
+        confidence but near-zero sim contributes almost nothing to the visual
         belief, because the semantic map is the class posterior projected onto
-        exactly these numbers. A run where every sim is ~0 means the goal
-        phrase and the class names are not meeting, and vision is effectively
-        just marking free space.
+        exactly these numbers.
         """
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
         self.get_logger().info(
@@ -502,9 +713,7 @@ class VAOTurtleBot4(Node):
             else:
                 self.get_logger().info(
                     f"  olfaction  raw {self.mq3_counts:.1f} - "
-                    f"baseline {self.mq3_baseline:.1f} = {counts:.1f} counts   "
-                    f"wind {self.wind_speed:.2f} m/s @ "
-                    f"{self.wind_direction:.0f} deg")
+                    f"baseline {self.mq3_baseline:.1f} = {counts:.1f} counts")
 
         if not self.use_V:
             return
@@ -538,15 +747,12 @@ class VAOTurtleBot4(Node):
                           default=float('nan'))),
             n_doa_samples=p['n_doa'],
             chemicalConc=p['counts'],
-            wind_direction=self.wind_direction,
-            wind_speed=self.wind_speed,
             H_fused=round(rf.map_entropy(self.p_fused), 3),
             trigger=round(trig, 4),
             peak_object=rf.peak_object_name(self),
-            # Guard on the tracker, not the modality flag: audition can be
-            # enabled while the device or topic is absent.
             q_s_map=float(np.exp(self.olfHyp.map_value())) if self.olfHyp else None,
             L0_map=float(self.sndHyp.map_value()) if self.sndHyp else None,
+            level_db=self._current_level_db(),
         ))
         np.savez_compressed(
             os.path.join(self.save_dir, f"maps_{self.step:03d}.npz"),
@@ -558,30 +764,44 @@ class VAOTurtleBot4(Node):
         pd.DataFrame(self.rows).to_csv(
             os.path.join(self.save_dir, 'trajectory_log.csv'), index=False)
         tx, tz = rf.fused_peak(self)
-        meta = dict(platform='turtlebot4_pro', ros_distro='jazzy',
+        meta = dict(platform='robuddy', ros_distro='humble',
                     modalities=self.modalities, steps=self.step + 1,
                     entropy_frac=self.entropy_frac,
                     estimated_source=dict(x=tx, y=tz),
                     peak_object=rf.peak_object_name(self),
                     mq3_baseline=self.mq3_baseline,
                     depth_rejected=self.n_depth_rejected,
-                    goal_phrase=self.goal_phrase)
+                    goal_phrase=self.goal_phrase,
+                    doa_offset_deg=DOA_OFFSET_DEG, doa_ccw=DOA_CCW)
         if self.olfHyp is not None:
             meta['q_s_map'] = float(np.exp(self.olfHyp.map_value()))
             meta['q_s_posterior'] = [float(v) for v in self.olfHyp.hypothesis_posterior()]
             meta['q_s_pegged'] = self.olfHyp.at_endpoint()
         if self.sndHyp is not None:
             meta['L0_map'] = float(self.sndHyp.map_value())
+            meta['L0_posterior'] = [float(v) for v in self.sndHyp.hypothesis_posterior()]
             meta['L0_pegged'] = self.sndHyp.at_endpoint()
+        meta['has_sound_level'] = self.has_sound_level
         with open(os.path.join(self.save_dir, 'run_meta.json'), 'w') as f:
             json.dump(meta, f, indent=2)
         self.get_logger().info(
             f"estimated source at map ({tx:.2f}, {tz:.2f}) -> {self.save_dir}")
 
+    def destroy_node(self):
+        self._stop_evt.set()
+        if self._audio_stream is not None:
+            try:
+                self._audio_stream.stop(); self._audio_stream.close()
+            except Exception:
+                pass
+        if self._doa_thread is not None:
+            self._doa_thread.join(timeout=1.0)
+        super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
-    node = VAOTurtleBot4()
+    node = VAORobuddy()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -1,34 +1,43 @@
 #!/usr/bin/env python3
 """
-voa_TB4Jazzy_functions.py  --  platform helpers for the TurtleBot4 VAO node.
+rosFunctions.py  --  platform helpers shared by every VAO ROS2 robot.
 
-Same role as sosl_functions.py in your other project: every function here takes
-the node and reads its state, so the control file stays ROS plumbing and a
-state machine.
+One implementation for the TurtleBot4 (Jazzy) and Robuddy (Humble). The two
+robots differ only in DATA -- topic names, frame names, camera intrinsics,
+which sensors exist -- and every one of those is read off the node, so there
+is nothing to fork.
 
-What is NOT here: any inference. The belief maps, likelihoods, hypothesis
-tracking and fusion all live in voa_functions/ and are used unchanged from the
-AI2-THOR experiments. This file only converts between what ROS publishes and
-what those modules expect.
+Contract: each function takes the node and reads its state, so the control
+files stay ROS plumbing and a state machine. No inference happens here --
+belief maps, likelihoods, hypothesis tracking and fusion all live in
+voa_functions/ unchanged from the AI2-THOR experiments.
 
-FRAME CONVENTION -- read before touching the auditory parts
------------------------------------------------------------
-ROS REP-103 is (x, y) with z up and yaw from +x toward +y.
-The algorithm is (x, z) with y up and yaw from +z toward +x.
+The node must provide: cam_hfov_deg, cam_vfov_deg, cam_height_m,
+depth_trust_max_m, free_evidence, nav_step_m, olf_sigma_log, doa_offset_deg,
+doa_ccw, doa_sigma_deg, doa_burst_bias_deg, doa_independent_frac,
+w_vision/w_olfact/w_sound, use_V/use_O/use_A, and the belief state built by
+build_grid_from_map.
 
-Mapping z := y makes them consistent, and the yaws relate by
+WHY NOT voa_functions/visionFunction.visionBranch
+-------------------------------------------------
+That one takes an ai2thor Controller and reads controller.last_event.
+depth_frame, and its boxDepth reads a float32 metre frame. On hardware the
+depth is a uint16 millimetre image at a different resolution from the RGB,
+and the pose comes from TF. Same NAME, different input -- these are the ROS
+implementations of the same idea, and both call the identical
+update_object_map / update_free_space underneath.
 
-    yaw_alg = (90 - yaw_ros) mod 360          <- ABSOLUTE bearings
-
-but a RELATIVE bearing (a DOA measured from robot forward) needs only
-
-    theta_alg = -theta_rel                    <- RELATIVE bearings
-
-because the two 90 degree offsets cancel. Applying the absolute form to a
-relative bearing rotates every DOA by 90 degrees AND mirrors it, and nothing
-raises -- the auditory posterior just converges, confidently, on a reflected
-location.
+FRAME CONVENTION
+----------------
+ROS REP-103 is (x, y) with z up and yaw from +x toward +y. The algorithm is
+(x, z) with y up and yaw from +z toward +x. Mapping z := y makes them
+consistent, and the yaws relate by yaw_alg = (90 - yaw_ros) mod 360 for
+ABSOLUTE bearings. A RELATIVE bearing (a DOA from robot forward) needs only
+negation, because the two 90 degree offsets cancel. Applying the absolute
+form to a relative bearing rotates every DOA by 90 degrees AND mirrors it,
+and nothing raises.
 """
+
 
 import math
 import numpy as np
@@ -64,15 +73,61 @@ def alg_deg_to_ros_yaw(yaw_alg_deg):
     return math.radians((90.0 - float(yaw_alg_deg)) % 360.0)
 
 
-def doa_to_alg_relative(raw_deg, offset_deg=0.0, ccw=True):
-    """Array DOA -> bearing relative to robot forward, algorithm convention.
+def circular_mean_deg(angles_deg):
+    """Mean of angles, computed on the circle.
 
-    `offset_deg` aligns the array's zero with the robot's forward axis (the
-    same quantity as CAMERA_MIC_OFFSET_DEG in your assistant controller).
-    `ccw` is the sense of rotation; if the array numbers bearings clockwise and
-    this is left True, every bearing is mirrored about the forward axis.
+    An arithmetic mean of 359 and 1 gives 180 -- the opposite direction. Every
+    average of bearings has to go through the unit circle.
 
-    Negation only -- see the frame note at the top of this file.
+    Defined here rather than imported so this file does not depend on which
+    revision of soundFunctions.py is installed.
+    """
+    a = np.radians(np.asarray(angles_deg, float))
+    return float(np.degrees(np.arctan2(np.sin(a).mean(), np.cos(a).mean())) % 360.0)
+
+
+def doa_to_alg_relative(raw_deg, offset_deg=0.0, ccw=False):
+    """Microphone-array DOA -> bearing relative to robot forward, algorithm units.
+
+    Two calibration constants, both of which must be right or the auditory
+    branch localises confidently to the wrong place with nothing raised.
+
+    offset_deg
+        Where the array's zero points relative to the robot's forward axis. If
+        the array is mounted rotated 30 degrees from centre, a source dead
+        ahead reads 30, and offset_deg = 30 removes that. Same quantity as
+        CAMERA_MIC_OFFSET_DEG in the Robuddy assistant controller. Calibrate by
+        putting the source directly in front and reading the raw value.
+
+    ccw
+        WHICH WAY THE ARRAY COUNTS. Some arrays number bearings
+        counter-clockwise (raw 90 = source on the LEFT), others clockwise
+        (raw 90 = source on the RIGHT). Nothing in the reading itself tells you
+        which; it is a property of the hardware.
+
+        Get it backwards and every bearing is MIRRORED about the forward axis:
+        a source on the right is believed to be on the left, by exactly the
+        same angle. Rays from several robot positions still cross -- just at
+        the mirror image of the true source -- so the belief looks healthy and
+        converges tightly onto the wrong spot.
+
+        For the ReSpeaker XVF3800, ccw=False. Verified against
+        soundFunctions.true_bearing_deg for a robot facing ROS +x:
+
+            source ahead   raw   0  ->  alg   0   (geometric   0)
+            source right   raw  90  ->  alg  90   (geometric  90)
+            source behind  raw 180  ->  alg 180   (geometric 180)
+            source left    raw 270  ->  alg 270   (geometric 270)
+
+        This also matches _doa_to_relative_rad in the Robuddy assistant
+        controller, which turns +CCW for raw > 180 (speaker on the left).
+
+    HOW TO CHECK ON HARDWARE: put the source clearly to the robot's RIGHT. If
+    the auditory belief builds up on the LEFT, flip this flag.
+
+    The conversion itself is a negation, NOT the 90 degree flip used for
+    absolute bearings -- for a relative bearing the two 90 degree offsets
+    cancel.
     """
     rel = float(raw_deg) - float(offset_deg)
     if not ccw:
@@ -271,14 +326,22 @@ def olfactionBranch(node):
     """
     if node.mq3_baseline is None or not node.have_olfaction:
         return None
-    counts = max(float(node.olfactionChemicalConc) - node.mq3_baseline, 0.0)
+    counts = max(float(node.mq3_counts) - node.mq3_baseline, 0.0)
     if counts <= 0.0:
         return counts
 
+    # NO WIND TERM. Neither robot carries an anemometer, and both the AI2-THOR
+    # experiments and the lab runs assume still air, so the plume is pure
+    # diffusion (U = 0). That is the same model the simulation was validated
+    # against, which keeps sim and hardware comparable.
+    #
+    # If you later run in a draught, this is where it breaks: a plume evaluated
+    # at U=0 in moving air places the estimated source UPWIND of the true one,
+    # and the error grows with wind speed. Fit an anemometer and pass
+    # U=wind_speed, psi_deg=(90 - wind_direction) % 360 here.
     predictor = hy.olfactory_predictor(
         node.gridX, node.gridZ, node.robot_map_posX, node.robot_map_posY,
-        U=float(node.olfactionWindSpeed),
-        psi_deg=(90.0 - float(node.olfactionWindDirection)) % 360.0)
+        U=0.0, psi_deg=0.0)
     node.olfHyp.update(predictor, float(np.log(counts)), node.olf_sigma_log)
     return counts
 
@@ -302,9 +365,12 @@ def auditionBranch(node):
     if not burst:
         return 0
 
+    # A burst entry is either a bare bearing or (bearing, level_db), depending
+    # on whether the array reports level. The XVF3800 does not.
+    pairs = [(b if isinstance(b, (tuple, list)) else (b, None)) for b in burst]
     rel = [doa_to_alg_relative(raw, node.doa_offset_deg, node.doa_ccw)
-           for raw, _ in burst]
-    theta = sf.circular_mean_deg(rel)
+           for raw, _ in pairs]
+    theta = circular_mean_deg(rel)
 
     n_eff = max(1.0, node.doa_independent_frac * len(rel))
     sigma_eff = float(np.hypot(node.doa_sigma_deg / math.sqrt(n_eff),
@@ -315,7 +381,7 @@ def auditionBranch(node):
                         node.robot_map_posX, node.robot_map_posY,
                         ros_yaw_to_alg_deg(yaw), theta, sigma_deg=sigma_eff)
 
-    levels = [lv for _, lv in burst if lv is not None]
+    levels = [lv for _, lv in pairs if lv is not None]
     if levels and node.sndHyp is not None:
         node.sndHyp.update(
             hy.auditory_predictor(node.gridX, node.gridZ,
@@ -374,8 +440,13 @@ def build_grid_from_map(node, map_msg, grid_step=0.25):
     node.soundLog = sf.init_sound_map(node.x_points, node.z_points)
     node.olfHyp = hy.ScaleHypotheses(hy.log_space_grid(node.q_s_hypotheses),
                                      shape, label='q_s') if node.use_O else None
-    node.sndHyp = hy.ScaleHypotheses(hy.db_grid(node.l0_hypotheses),
-                                     shape, label='L0') if node.use_A else None
+    # The range hypothesis needs a LEVEL. An array that reports bearing only
+    # (the XVF3800) leaves this None, and audition is a ray rather than a spot
+    # until the robot moves and rays cross.
+    node.sndHyp = (hy.ScaleHypotheses(hy.db_grid(node.l0_hypotheses),
+                                      shape, label='L0')
+                   if (node.use_A and getattr(node, 'has_sound_level', False))
+                   else None)
 
     uni = mask.astype(float)
     uni /= uni.sum()
