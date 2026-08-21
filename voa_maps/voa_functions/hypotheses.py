@@ -2,17 +2,14 @@
 hypotheses.py  --  unknown source strength, tracked as a few hypotheses.
 
 Both the olfactory and auditory branches have the same problem: the forward
-model needs a source-strength constant that nobody knows.
+model needs a source-strength constant that is unknown to the robot.
 
-    olfaction   c(r) = q_s / (4 pi D r) * exp(-r/lambda)      q_s unknown
-    audition    L(r) = L0 - 20 log10(r)                       L0 unknown
+olfaction   c(r) = q_s / (4 pi D r) * exp(-r/lambda)      q_s unknown [steady-state concentration of a chemical odorant as it diffuses from a continuous point source]
+audition    L(r) = L0 - 20 log10(r)                       L0 unknown [acoustic inverse square law for calculating the sound pressure level (SPL) at a specific distance from a point source in a free field]
 
 Both are unidentifiable from a single reading -- a weak source nearby and a
-strong source far away give the same number. Worse, guessing is not safe:
-measured on a 4 m grid, an emission rate wrong by 10x pushed localisation from
-0.39 m to 2.58 m, and a loudness wrong by 15 dB from 0.18 m to 2.83 m.
-
-Both also become identifiable across several readings, because the strength
+strong source far away give the same number.
+But they become identifiable across several readings, because the strength
 cancels in differences:
 
     log c_i - log c_j  depends only on r_i, r_j     (q_s cancels)

@@ -49,30 +49,10 @@ yolo_model = YOLO("models/YOLO/yolo26mFT2.pt")
 # ============================================================= CONFIG
 
 STEP_THRESHOLD = 100
-# Inflated sigma (see SIGMA_INFLATION in the controller) buys accuracy at the
-# cost of a broader posterior, so the fused entropy settles higher: measured
-# ~0.90 for two-modality sets and ~0.68 for VAO. A single 0.5 threshold is
-# unreachable for VO and VA, and those runs would silently burn the step
-# budget. The arrival test is what actually certifies a find; this threshold
-# only gates when the approach begins.
 ENTROPY_FRACS = [0.7]
 SIGMA_NOISE = 20
 GRID_STEP = 0.25
 
-# CONDITION vs MODALITY are independent axes -- this is a grid, not a mapping.
-#
-#   condition  = what the SCENE emits          (odor / sound / both)
-#   modality   = which SENSORS the robot uses  (the ablation)
-#
-# So 'VA' does not mean "the sound-only scene". It means "use vision and
-# audition", and it is run against EVERY scene that has sound -- including
-# FloorPlan401, which also emits odor. That run is the ablation cell "bimodal
-# source, robot ignores its nose", which is what isolates olfaction's
-# contribution. It is meant to happen.
-#
-# The two guards below only drop IMPOSSIBLE cells (a sensor whose stimulus does
-# not exist in that scene), never merely redundant ones.
-#
 # Full ablation: ['VAO', 'VA', 'VO', 'AO', 'V', 'A', 'O']
 MODALITY_SETS = ['VAO', 'VA', 'VO']
 
