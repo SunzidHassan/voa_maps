@@ -10,9 +10,9 @@ import pandas as pd
 import numpy as np
 import math
 
-from voa_functions.olfactionFunctions import gaussian_plume
+from .olfactionFunctions import gaussian_plume
 
-from voa_functions.utils import (
+from .utils import (
     world_to_grid
 )
 

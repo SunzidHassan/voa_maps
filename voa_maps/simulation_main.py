@@ -35,14 +35,14 @@ from ultralytics import YOLO
 from ControlAlgorithms.AI2Thor.ai2thor_controller import fusion_control
 # from ControlAlgorithms.RandomWalk.random_controller import randomWalk_control
 
-from voa_functions.utils import world_to_grid, get_iThor_object_centers
-from voa_functions.olfactionFunctions import BayesianAgent
-from voa_functions.soundFunctions import SoundSource
-from voa_functions.loggerFunctions import (
+from .voa_functions.utils import world_to_grid, get_iThor_object_centers
+from .voa_functions.olfactionFunctions import BayesianAgent
+from .voa_functions.soundFunctions import SoundSource
+from .voa_functions.loggerFunctions import (
     generate_trajectory_plot,
     generate_batch_summary,
 )
-from voa_functions.summary import generate_summary
+from .voa_functions.summary import generate_summary
 
 yolo_model = YOLO("models/YOLO/yolo26mFT2.pt")
 
