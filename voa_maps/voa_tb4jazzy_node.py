@@ -53,7 +53,8 @@ from rclpy.qos import (qos_profile_sensor_data, QoSProfile, QoSDurabilityPolicy,
 from geometry_msgs.msg import Twist, Vector3
 from sensor_msgs.msg import CompressedImage, LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose, Spin
+from builtin_interfaces.msg import Duration
 
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
@@ -137,6 +138,18 @@ W_VISION, W_OLFACT = 1.0, 0.5
 W_SOUND = 0.0              # unused: no microphone array
 ENTROPY_FRAC = 0.7
 MAX_STEPS = 40
+
+# --- initialization phase: 4 orthogonal egocentric views before search ---
+# Mirrors initialize_envKnowledge in the AI2-THOR simulation, which rotates
+# 4x90 degrees and calls the vision branch at each stop before search begins.
+# Doing this on hardware too means the object map starts with a real look
+# around the room instead of whatever the first few search steps happen to
+# see, and it gives olfaction (and audition, if fitted) an initial reading
+# from every direction rather than just the one the robot happened to be
+# facing at startup.
+INIT_HEADINGS = 4
+INIT_SPIN_RAD = math.pi / 2.0     # 90 degrees, closed-loop via nav2's Spin action
+SPIN_TIMEOUT_S = 15.0
 FREE_EVIDENCE = 3.0
 
 
@@ -209,6 +222,7 @@ class VAOTurtleBot4(Node):
                                  qos_profile_sensor_data)
         self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, MAP_QOS)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.spin_client = ActionClient(self, Spin, 'spin')
 
         # --- sensor state (names match sosl_functions expectations) ---
         self.latest_rgb_image = None
@@ -243,6 +257,14 @@ class VAOTurtleBot4(Node):
         self.n_depth_rejected = 0
 
         # --- loop state ---
+        # Phase names match the AI2-THOR simulation's behavior_flag values
+        # ("Initialization", "search", "goal_navigation") so runs from both
+        # environments group the same way in analysis.
+        self.phase = 'Initialization'
+        self.init_index = 0
+        self.spin_active = False
+        self.spin_deadline = 0.0
+
         self.state = 'WAIT_MAP'
         self.step = 0
         self.rows = []
@@ -318,6 +340,33 @@ class VAOTurtleBot4(Node):
     def halt(self):
         self.cmd_vel_pub.publish(Twist())
 
+    def send_spin(self, relative_yaw_rad):
+        """Closed-loop in-place rotation via nav2's Spin action.
+
+        Relative to current heading; positive is CCW per REP-103, so no frame
+        conversion is needed -- this never touches the algorithm's (x, z) yaw
+        convention at all, it is a pure ROS rotation command.
+        """
+        if not self.spin_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().warn("nav2 spin action unavailable")
+            return False
+        g = Spin.Goal()
+        g.target_yaw = float(relative_yaw_rad)
+        g.time_allowance = Duration(sec=int(SPIN_TIMEOUT_S))
+        self.spin_active = True
+        self.spin_deadline = time.time() + SPIN_TIMEOUT_S
+        self.spin_client.send_goal_async(g).add_done_callback(self._spin_response)
+        return True
+
+    def _spin_response(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().warn("nav2 rejected the spin goal")
+            self.spin_active = False
+            return
+        handle.get_result_async().add_done_callback(
+            lambda f: setattr(self, 'spin_active', False))
+
     # ---------------------------------------------------------------- nav2
     def send_nav_goal(self, gx, gy, yaw):
         if not self.nav_client.wait_for_server(timeout_sec=3.0):
@@ -385,7 +434,7 @@ class VAOTurtleBot4(Node):
                 f"camera OK -- RGB {self.latest_rgb_shape[1]}x{self.latest_rgb_shape[0]}, "
                 f"depth {self.latest_depth_image.shape[1]}x{self.latest_depth_image.shape[0]} "
                 f"({self.latest_depth_image.dtype})")
-            self.state = 'BASELINE' if self.use_O else 'SENSE'
+            self.state = 'BASELINE' if self.use_O else 'INIT_BEGIN'
             return
 
         if self.state == 'BASELINE':
@@ -399,7 +448,67 @@ class VAOTurtleBot4(Node):
                 self.get_logger().info(
                     f"MQ3 clean-air baseline {self.mq3_baseline:.1f} counts "
                     f"from {len(self._baseline_buf)} samples")
+                self.state = 'INIT_BEGIN'
+            return
+
+        if self.state == 'INIT_BEGIN':
+            self.init_index = 0
+            self.phase = 'Initialization'
+            self.get_logger().info(
+                f"=== INITIALIZATION: {INIT_HEADINGS} orthogonal views ===")
+            self.state = 'INIT_SENSE'
+            return
+
+        if self.state == 'INIT_SENSE':
+            if not self.update_pose(self.latest_rgb_stamp):
+                return
+            dets, n_rej = [], 0
+            if self.use_V:
+                annotated, dets, n_rej = rf.visionBranch(self.yoloModel, self)
+                self.n_depth_rejected += n_rej
+                if annotated is not None:
+                    cv.imwrite(os.path.join(
+                        self.save_dir, f"init_{self.init_index:02d}.jpg"), annotated)
+            counts = rf.olfactionBranch(self) if self.use_O else None
+            self.get_logger().info(
+                f"--- init view {self.init_index + 1}/{INIT_HEADINGS} @ "
+                f"({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f}) ---")
+            self.report_sensing(dets, n_rej, counts)
+            self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts, n_doa=0,
+                                 dets=dets, rx=self.robot_map_posX, ry=self.robot_map_posY)
+            self.log_init_view(self._pending)
+
+            self.state = 'INIT_NEXT'
+            return
+
+        if self.state == 'INIT_NEXT':
+            self.init_index += 1
+            if self.init_index >= INIT_HEADINGS:
+                self.get_logger().info(
+                    "=== INITIALIZATION complete; entering SEARCH ===")
+                self.phase = 'search'
                 self.state = 'SENSE'
+                return
+            if self.send_spin(INIT_SPIN_RAD):
+                self.state = 'INIT_ROTATE'
+            else:
+                # No spin server: proceed without turning rather than crash.
+                # Every view will then be the same heading, which is a real
+                # loss of coverage but a recoverable one -- worth fixing nav2
+                # before trusting the object map, not worth stopping the run.
+                self.get_logger().warn(
+                    "cannot rotate for the next view; continuing at the "
+                    "current heading (coverage will be incomplete)")
+                self.state = 'INIT_SENSE'
+            return
+
+        if self.state == 'INIT_ROTATE':
+            if self.spin_active and now < self.spin_deadline:
+                return
+            if self.spin_active:
+                self.get_logger().warn("spin action timed out; continuing anyway")
+                self.spin_active = False
+            self.state = 'INIT_SENSE'
             return
 
         if self.state == 'SENSE':
@@ -440,6 +549,7 @@ class VAOTurtleBot4(Node):
                 self.get_logger().info(
                     f"{why}; peak is {rf.peak_object_name(self)} at "
                     f"({tx:.2f}, {tz:.2f}); driving there and terminating")
+                self.phase = 'goal_navigation'
                 self.send_nav_goal(tx, tz,
                                    math.atan2(tz - p['ry'], tx - p['rx']))
                 self.state = 'FINISH'
@@ -525,10 +635,23 @@ class VAOTurtleBot4(Node):
                 f"{d['depth']:>7.2f}m{d['x']:>9.2f}{d['y']:>9.2f}{d['sim']:>8.3f}")
 
     # ---------------------------------------------------------------- output
+    def log_init_view(self, p):
+        """One row per orthogonal init view -- no trigger/entropy yet, since
+        the belief has not been fused at this point."""
+        yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
+        self.rows.append(dict(
+            step=-1, phase='Initialization', init_view=self.init_index,
+            time=round(time.time() - self.t0, 2),
+            robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
+            robot_yaw=round(math.degrees(yaw), 1),
+            n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
+            n_doa_samples=p['n_doa'], chemicalConc=p['counts'],
+        ))
+
     def log_step(self, p, trig):
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
         self.rows.append(dict(
-            step=self.step, time=round(time.time() - self.t0, 2),
+            step=self.step, phase=self.phase, time=round(time.time() - self.t0, 2),
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
@@ -565,7 +688,8 @@ class VAOTurtleBot4(Node):
                     peak_object=rf.peak_object_name(self),
                     mq3_baseline=self.mq3_baseline,
                     depth_rejected=self.n_depth_rejected,
-                    goal_phrase=self.goal_phrase)
+                    goal_phrase=self.goal_phrase,
+                    final_phase=self.phase)
         if self.olfHyp is not None:
             meta['q_s_map'] = float(np.exp(self.olfHyp.map_value()))
             meta['q_s_posterior'] = [float(v) for v in self.olfHyp.hypothesis_posterior()]

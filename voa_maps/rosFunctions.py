@@ -18,15 +18,6 @@ doa_ccw, doa_sigma_deg, doa_burst_bias_deg, doa_independent_frac,
 w_vision/w_olfact/w_sound, use_V/use_O/use_A, and the belief state built by
 build_grid_from_map.
 
-WHY NOT voa_functions/visionFunction.visionBranch
--------------------------------------------------
-That one takes an ai2thor Controller and reads controller.last_event.
-depth_frame, and its boxDepth reads a float32 metre frame. On hardware the
-depth is a uint16 millimetre image at a different resolution from the RGB,
-and the pose comes from TF. Same NAME, different input -- these are the ROS
-implementations of the same idea, and both call the identical
-update_object_map / update_free_space underneath.
-
 FRAME CONVENTION
 ----------------
 ROS REP-103 is (x, y) with z up and yaw from +x toward +y. The algorithm is
