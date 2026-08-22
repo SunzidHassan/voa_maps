@@ -1,9 +1,8 @@
 # Log files
 *.log
 __pycache__/
-
 # Save directory
 voa_maps/models
 voa_maps/save
-
+models/
 configs/config.yaml
