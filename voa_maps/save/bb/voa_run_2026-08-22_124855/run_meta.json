@@ -1,0 +1,28 @@
+{
+  "platform": "robuddy",
+  "ros_distro": "humble",
+  "modalities": "VO",
+  "steps": 4,
+  "entropy_frac": 0.7,
+  "estimated_source": {
+    "x": -2.5,
+    "y": -7.5
+  },
+  "peak_object": "unobserved",
+  "mq3_baseline": 150.0,
+  "depth_rejected": 43,
+  "goal_phrase": "Is emitting rotten food smell odor:",
+  "final_phase": "goal_navigation",
+  "doa_offset_deg": 0.0,
+  "doa_ccw": false,
+  "q_s_map": 999.9999999999998,
+  "q_s_posterior": [
+    0.2,
+    0.2,
+    0.2,
+    0.2,
+    0.2
+  ],
+  "q_s_pegged": false,
+  "has_sound_level": true
+}
