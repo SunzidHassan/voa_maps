@@ -3,6 +3,6 @@
 __pycache__/
 # Save directory
 voa_maps/models
-voa_maps/save/sim
+voa_maps/save/simulation
 models/
 configs/config.yaml
