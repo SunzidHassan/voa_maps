@@ -18,6 +18,15 @@ doa_ccw, doa_sigma_deg, doa_burst_bias_deg, doa_independent_frac,
 w_vision/w_olfact/w_sound, use_V/use_O/use_A, and the belief state built by
 build_grid_from_map.
 
+WHY NOT voa_functions/visionFunction.visionBranch
+-------------------------------------------------
+That one takes an ai2thor Controller and reads controller.last_event.
+depth_frame, and its boxDepth reads a float32 metre frame. On hardware the
+depth is a uint16 millimetre image at a different resolution from the RGB,
+and the pose comes from TF. Same NAME, different input -- these are the ROS
+implementations of the same idea, and both call the identical
+update_object_map / update_free_space underneath.
+
 FRAME CONVENTION
 ----------------
 ROS REP-103 is (x, y) with z up and yaw from +x toward +y. The algorithm is
@@ -466,10 +475,23 @@ def update_belief(node):
     Returns the normalised fused entropy, which is the termination statistic.
     """
     if node.use_V:
+        gp = node.goal_phrase if node.use_O else None
+        ss = node.sound_sim if node.use_A else None
+        if gp is None and ss is None:
+            # VA mode before the first sound has been heard: olfaction is off
+            # so there is no odour phrase, and CLAP has not produced a sound
+            # similarity vector yet (it only runs after the first successful
+            # DOA burst, and falls back to SBERT if laion_clap is missing).
+            # With both absent, combine_similarity has nothing to work with
+            # and raises -- which crashed the very first search step.
+            #
+            # Fall back to the sound phrase as plain TEXT. It describes the
+            # same target CLAP would have embedded, so vision still has a
+            # semantic goal to project the object map onto instead of the run
+            # dying before it starts.
+            gp = getattr(node, 'sound_phrase', None) or node.goal_phrase
         node.p_vis = mask_normalise(node, vf.visual_likelihood_multimodal(
-            node.objectMap,
-            goal_phrase=node.goal_phrase if node.use_O else None,
-            sound_sim=node.sound_sim if node.use_A else None))
+            node.objectMap, goal_phrase=gp, sound_sim=ss))
     if node.use_O and node.olfHyp is not None:
         node.p_olf = mask_normalise(node, node.olfHyp.cell_posterior())
     if node.use_A:
@@ -531,3 +553,207 @@ def pick_goal(node):
     fy = node.gridZ.ravel()[free_idx]
     j = int(np.argmin((fx - gx) ** 2 + (fy - gy) ** 2))
     return float(fx[j]), float(fy[j]), heading
+
+
+# ============================================================= RENDERING
+#
+# Everything below writes PNGs for a run. Kept here rather than in either node
+# so both robots produce identically-formatted output, and so the simulation's
+# figures and the hardware figures can be read the same way.
+
+import os
+import matplotlib
+matplotlib.use('Agg')          # no display on a robot; must be set before pyplot
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import matplotlib.patheffects as pe
+
+
+def _peak_of(m, x_points, z_points):
+    """(x, z, probability) of the highest cell in a belief map."""
+    gi = np.unravel_index(int(np.argmax(m)), m.shape)
+    return float(x_points[gi[1]]), float(z_points[gi[0]]), float(m[gi])
+
+
+def _cell_object_name(node, row, col):
+    """What the object map believes occupies one cell.
+
+    Three distinguishable answers, and the third is the one that matters:
+      - a class name       : a detection has landed here
+      - 'empty floor'      : looked at, nothing found
+      - 'unobserved'       : no evidence of any kind has reached this cell yet
+    A belief peak on an unobserved cell means the estimate is pointing
+    somewhere vision has never actually checked.
+    """
+    if node.objectMap is None:
+        return "?"
+    try:
+        if not vf.observed_mask(node.objectMap)[row, col]:
+            return "unobserved"
+        k = int(np.argmax(vf.object_posterior(node.objectMap)[row, col]))
+        return vf.CLASSES[k] if k < len(vf.CLASSES) else "?"
+    except Exception:
+        return "?"
+
+
+def _draw_trail(ax, node):
+    """Straight lines through every pose the robot has occupied, plus a marker
+    at the current one. Shows the actual path taken, not just where it ended.
+    """
+    trail = getattr(node, 'trail', None)
+    if not trail:
+        return
+    t = np.asarray(trail, dtype=float)
+    ax.plot(t[:, 0], t[:, 1], '-', lw=1.6, color='#1f77b4', alpha=0.9, zorder=4)
+    ax.plot(t[:, 0], t[:, 1], '.', ms=3, color='#1f77b4', alpha=0.7, zorder=4)
+    ax.plot(t[-1, 0], t[-1, 1], marker='o', ms=9, mfc='#1f77b4', mec='white',
+            mew=1.5, ls='', zorder=6, label='robot')
+
+
+def _label_peak(ax, node, arr, x_points, z_points, name_it):
+    """Circle the map's own argmax; optionally name the object believed there."""
+    lo, hi = float(arr.min()), float(arr.max())
+    if hi <= lo + 1e-12:
+        return                      # flat map: argmax would be an arbitrary corner
+    px, pz, pv = _peak_of(arr, x_points, z_points)
+    ax.plot(px, pz, marker='o', ms=15, mfc='none', mec='#39ff14', mew=2.2,
+            ls='', zorder=7)
+    ax.plot(px, pz, marker='+', ms=8, mec='#39ff14', mew=1.4, ls='', zorder=7)
+
+    if name_it:
+        gi = np.unravel_index(int(np.argmax(arr)), arr.shape)
+        label = f"{_cell_object_name(node, gi[0], gi[1])}\n({px:.2f}, {pz:.2f})"
+    else:
+        label = f"({px:.2f}, {pz:.2f})\np={pv:.3f}"
+
+    xmid = 0.5 * (float(np.min(x_points)) + float(np.max(x_points)))
+    zmid = 0.5 * (float(np.min(z_points)) + float(np.max(z_points)))
+    dx = -12 if px > xmid else 12
+    dz = -14 if pz > zmid else 12
+    ax.annotate(label, xy=(px, pz), xytext=(dx, dz), textcoords='offset points',
+                ha='right' if dx < 0 else 'left',
+                va='top' if dz < 0 else 'bottom',
+                fontsize=7, color='#39ff14', fontweight='bold',
+                annotation_clip=False, zorder=8,
+                path_effects=[pe.withStroke(linewidth=2.2, foreground='black')])
+
+
+def save_belief_maps(node, step, prefix='maps'):
+    """One PNG per step: only the modalities this run actually uses, plus fused.
+
+    A disabled branch holds a uniform map, and rendering it produces a flat
+    panel that reads as a broken sensor rather than a switched-off one -- so a
+    VO run gets 3 panels (olfactory, visual, fused) and a VA run gets 3
+    (visual, auditory, fused), never a blank column.
+
+    Non-free cells are drawn as blank rather than as zero, so the room's real
+    shape is visible instead of a rectangle with a dark border.
+    """
+    try:
+        xp, zp, free = node.x_points, node.z_points, node.free_mask
+        panels = []
+        if node.use_O and node.p_olf is not None:
+            panels.append(('Olfactory', node.p_olf, False))
+        if node.use_V and node.p_vis is not None:
+            panels.append(('Visual (semantic)', node.p_vis, True))
+        if node.use_A and node.p_snd is not None:
+            panels.append(('Auditory (DOA)', node.p_snd, False))
+        panels.append(('Fused', node.p_fused, True))
+
+        extent = [float(np.min(xp)), float(np.max(xp)),
+                  float(np.min(zp)), float(np.max(zp))]
+        fig, axes = plt.subplots(1, len(panels), figsize=(5.0 * len(panels), 4.6),
+                                 squeeze=False)
+        axes = axes[0]
+
+        for ax, (title, arr, name_peak) in zip(axes, panels):
+            a = np.asarray(arr, float)
+            lo, hi = a.min(), a.max()
+            norm = (a - lo) / (hi - lo) if hi > lo + 1e-12 else np.zeros_like(a)
+            shown = np.where(free, norm, np.nan)     # NaN renders as blank
+            im = ax.imshow(shown, origin='lower', extent=extent, cmap='hot',
+                           aspect='equal', vmin=0.0, vmax=1.0)
+            ax.set_title(f"{title}  H={map_entropy(a):.2f}", fontsize=11)
+            ax.set_xlabel('x (m)')
+            ax.set_ylabel('y (m)')
+            ax.grid(True, ls='--', lw=0.4, alpha=0.4)
+            _draw_trail(ax, node)
+            _label_peak(ax, node, a, xp, zp, name_peak)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        fig.suptitle(f"{node.phase}  step {step}  [{node.modalities}]", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(os.path.join(node.save_dir, f"{prefix}_{step:03d}.png"), dpi=120)
+        plt.close(fig)
+    except Exception as e:
+        node.get_logger().warn(f"belief map render failed at step {step}: {e}")
+        plt.close('all')
+
+
+def save_object_map(node, step, prefix='objects'):
+    """Flat semantic map of the environment: the most likely class per cell.
+
+    This is the raw object map, NOT a belief about the source -- it answers
+    "what has the robot seen and where", which is the thing that makes a
+    wrong fused peak interpretable after the fact.
+    """
+    try:
+        if node.objectMap is None:
+            return
+        xp, zp, free = node.x_points, node.z_points, node.free_mask
+        observed = vf.observed_mask(node.objectMap)
+        mle = np.argmax(vf.object_posterior(node.objectMap), axis=2)
+
+        # Only label classes that actually appear, so the legend stays short
+        # even with an 80-class COCO detector.
+        shown_cells = observed & free
+        present = sorted(set(int(k) for k in np.unique(mle[shown_cells]))) \
+            if shown_cells.any() else []
+        if not present:
+            return
+        remap = {k: i for i, k in enumerate(present)}
+        img = np.full(mle.shape, np.nan)
+        for k, i in remap.items():
+            img[shown_cells & (mle == k)] = i
+
+        extent = [float(np.min(xp)), float(np.max(xp)),
+                  float(np.min(zp)), float(np.max(zp))]
+        n = len(present)
+        cmap = plt.get_cmap('tab20', max(n, 2))
+        fig, ax = plt.subplots(figsize=(7.0, 5.2))
+        im = ax.imshow(img, origin='lower', extent=extent, cmap=cmap,
+                       vmin=-0.5, vmax=n - 0.5, aspect='equal')
+        ax.set_title(f"object map -- {node.phase} step {step}", fontsize=12)
+        ax.set_xlabel('x (m)')
+        ax.set_ylabel('y (m)')
+        ax.grid(True, ls='--', lw=0.4, alpha=0.4)
+        _draw_trail(ax, node)
+
+        cb = fig.colorbar(im, ax=ax, ticks=range(n), fraction=0.046, pad=0.04)
+        cb.ax.set_yticklabels([vf.CLASSES[k] if k < len(vf.CLASSES) else '?'
+                               for k in present], fontsize=7)
+        fig.tight_layout()
+        fig.savefig(os.path.join(node.save_dir, f"{prefix}_{step:03d}.png"), dpi=120)
+        plt.close(fig)
+    except Exception as e:
+        node.get_logger().warn(f"object map render failed at step {step}: {e}")
+        plt.close('all')
+
+
+def belief_arrays_for_saving(node):
+    """Only the belief arrays this run's modalities actually produced.
+
+    Saving a uniform placeholder for a disabled branch wastes space and, worse,
+    reads later as "this modality ran and learned nothing" rather than "this
+    modality was switched off".
+    """
+    out = dict(fused=node.p_fused, free=node.free_mask,
+               x_points=node.x_points, z_points=node.z_points)
+    if node.use_V:
+        out['vision'] = node.p_vis
+    if node.use_O:
+        out['olfaction'] = node.p_olf
+    if node.use_A:
+        out['sound'] = node.p_snd
+    return out

@@ -5,6 +5,11 @@ voa_BBHumble_node.py  --  VAO source localisation on Robuddy (ROS2 Humble).
     ros2 run voa_maps bb_node
     ros2 run voa_maps bb_node --ros-args -p goal_phrase:="rotten food smell"
 
+    # Modality ablation -- same convention as the AI2-THOR sim's MODALITY_SETS
+    ros2 run voa_maps bb_node --ros-args -p modalities:=VAO   # all three senses
+    ros2 run voa_maps bb_node --ros-args -p modalities:=VA    # vision + audition
+    ros2 run voa_maps bb_node --ros-args -p modalities:=VO    # vision + olfaction
+
 Sibling of voa_TB4Jazzy_node.py. Control only: ROS interfaces, callbacks and the
 state machine. Sensor maths is in rosFunctions.py (shared with the TurtleBot4); inference is in
 voa_functions/ unchanged from the AI2-THOR runs.
@@ -135,7 +140,14 @@ LISTEN_S = 3.0
 EGO_NOISE_VEL = 0.02
 
 # --- audition ---
-ENABLE_AUDITION = True
+# 'VAO'  = all three senses processed (the default: full ablation baseline)
+# 'VA'   = vision + audition, olfaction skipped entirely (no MQ3 subscription,
+#          no q_s tracker)
+# 'VO'   = vision + olfaction, audition skipped (no ReSpeaker probe, no DOA
+#          thread, no audio stream)
+# Same convention as the AI2-THOR simulation's MODALITY_SETS. Overridden by
+# the `modalities` ROS parameter at runtime; this is only the default.
+DEFAULT_MODALITIES = 'VAO'
 DOA_OFFSET_DEG = 0.0        # array zero vs robot forward; calibrate once
 DOA_CCW = False             # VERIFIED for this array -- see the functions file
 DOA_SIGMA_DEG = 15.0
@@ -263,15 +275,26 @@ class VAORobuddy(Node):
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
         self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
-        self.declare_parameter('enable_audition', ENABLE_AUDITION)
+        self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
         gp = lambda n: self.get_parameter(n).value
 
         self.goal_phrase = f"Is emitting {gp('goal_phrase')} odor:"
         self.sound_phrase = gp('sound_phrase')
         self.entropy_frac = float(gp('entropy_frac'))
-        self.use_V, self.use_O = True, True
-        self.use_A = bool(gp('enable_audition'))
+        # Which senses this run actually processes -- same convention as the
+        # AI2-THOR simulation's ablation strings ('VAO', 'VA', 'VO', ...).
+        # Hardware availability can still veto A even if requested (see the
+        # ReSpeaker probe below); V and O are software-only toggles.
+        requested = ''.join(sorted(set(gp('modalities').upper()) & set('VAO')))
+        if not requested:
+            self.get_logger().warn(
+                f"modalities={gp('modalities')!r} contains none of V/A/O; "
+                f"defaulting to {DEFAULT_MODALITIES}")
+            requested = DEFAULT_MODALITIES
+        self.use_V = 'V' in requested
+        self.use_O = 'O' in requested
+        self.use_A = 'A' in requested   # may still be revoked below if no device
 
         # --- config exposed to the helpers via node state ---
         self.cam_hfov_deg, self.cam_vfov_deg = CAM_HFOV_DEG, CAM_VFOV_DEG
@@ -325,9 +348,21 @@ class VAORobuddy(Node):
                 f"no XVF3800 at VID {RESPEAKER_VID:#06x} PID {RESPEAKER_PID:#06x}; "
                 f"auditory branch disabled")
             self.use_A = False
+        # Actual modalities, after hardware has had a chance to veto A. This
+        # can differ from `requested` (e.g. requested 'VAO' with no ReSpeaker
+        # attached actually runs as 'VO') -- both are recorded in run_meta so
+        # a missing device shows up in the results rather than silently
+        # changing what the run claims to have tested.
+        self.requested_modalities = requested
         self.modalities = ''.join(c for c, on in
                                   (('V', self.use_V), ('A', self.use_A),
                                    ('O', self.use_O)) if on)
+        if self.modalities != self.requested_modalities:
+            self.get_logger().warn(
+                f"requested modalities={self.requested_modalities} but running "
+                f"as {self.modalities} (hardware unavailable)")
+        self.save_dir = os.path.join(self.save_dir, self.modalities)
+        os.makedirs(self.save_dir, exist_ok=True)
         self.get_logger().info(
             f"modalities={self.modalities}  save_dir={self.save_dir}")
 
@@ -339,7 +374,8 @@ class VAORobuddy(Node):
                                  self.image_callback, qos_profile_sensor_data)
         self.create_subscription(CompressedImage, DEPTH_TOPIC,
                                  self.depth_callback, qos_profile_sensor_data)
-        self.create_subscription(Float32, MQ3_TOPIC, self.mq3_callback, 10)
+        if self.use_O:
+            self.create_subscription(Float32, MQ3_TOPIC, self.mq3_callback, 10)
         self.create_subscription(LaserScan, SCAN_TOPIC, self.laser_callback,
                                  qos_profile_sensor_data)
         self.create_subscription(Odometry, ODOM_TOPIC, self.odom_callback,
@@ -365,6 +401,10 @@ class VAORobuddy(Node):
         self.mq3_baseline = MQ3_BASELINE
         self.lin_vel = 0.0
         self.ang_vel = 0.0
+        # Every pose the robot has occupied, for the trajectory lines drawn on
+        # every saved map. Appended by update_pose, so it captures init-phase
+        # views and mid-drive samples too, not just one point per search step.
+        self.trail = []
 
         self.doa_lock = threading.Lock()
         self.doa_burst = []
@@ -489,38 +529,19 @@ class VAORobuddy(Node):
         a constant offset cancels in the position-to-position differences that
         actually carry the range information.
         """
-        # sounddevice calls this automatically, on its own thread, once per
-        # audio block -- we never call it ourselves.
         try:
-            # indata arrives as int16 samples; widen to float64 before
-            # squaring, or int16 overflows almost immediately.
             x = np.asarray(indata, dtype=np.float64)
             if x.ndim > 1:
-                # indata is (frames, channels) when multi-channel. Pick ONE
-                # channel rather than averaging all of them -- averaging would
-                # blend two independently beamformed signals together.
                 ch = min(AUDIO_LEVEL_CHANNEL, x.shape[1] - 1)
                 x = x[:, ch]
-            # Root-mean-square: the standard loudness measure for a block of
-            # samples. Squaring first means silence (positive and negative
-            # samples) doesn't cancel itself out to zero.
             rms = float(np.sqrt(np.mean(x * x)))
             if rms > 0.0:
-                # Convert to a dB-like scale. LEVEL_REF_RMS is just 1.0, so
-                # this isn't calibrated to any real-world dB SPL -- it's only
-                # useful as a relative number that moves consistently.
                 with self._level_lock:
                     self._level_db = 20.0 * math.log10(rms / LEVEL_REF_RMS)
         except Exception:
-            # sounddevice runs this in an audio thread it does not expect to
-            # crash. Swallowing errors here trades "silently miss one block"
-            # against "silently kill the audio stream" -- the former is
-            # recoverable next block, the latter is not.
             pass
 
     def _current_level_db(self):
-        # Thread-safe read of the latest level. May be called from either the
-        # DOA polling thread or the main ROS thread.
         with self._level_lock:
             return self._level_db
 
@@ -532,39 +553,18 @@ class VAORobuddy(Node):
         the belief. The velocity check catches residual motion during the
         settle window and anything nav2 issues unexpectedly.
         """
-        # Runs for the lifetime of the node on its own thread, started once at
-        # startup. Reads: how long to sleep between polls, from the configured
-        # poll rate.
         period = 1.0 / DOA_POLL_HZ
         while not self._stop_evt.is_set():
-            # Only sample while explicitly "listening" (the search-phase LISTEN
-            # state / init-phase equivalent) AND the base is confirmed still --
-            # both linear and angular velocity near zero. Skipping the USB read
-            # entirely when not listening also avoids hammering the device for
-            # no reason the rest of the time.
             if self.listening and self.lin_vel <= EGO_NOISE_VEL \
                     and self.ang_vel <= EGO_NOISE_VEL:
-                # One blocking USB control-transfer read: current DOA angle and
-                # whether the array's own voice-activity flag is set.
                 angle, is_speech = self.respeaker.read_doa()
-                # angle is None if the read failed. is_speech gating is
-                # optional -- DOA_REQUIRE_SPEECH lets you accept bearings for
-                # non-speech sounds (e.g. mechanical alarms) too.
                 if angle is not None and (is_speech or not DOA_REQUIRE_SPEECH):
                     # Pair each bearing with the level measured at the same
                     # moment. rosFunctions.auditionBranch accepts either a bare
                     # angle or an (angle, level) tuple.
-                    # has_sound_level is False if this platform/array has no
-                    # usable level signal, in which case every sample is
-                    # (angle, None) and downstream code treats it as
-                    # bearing-only.
                     lvl = self._current_level_db() if self.has_sound_level else None
-                    # Locked because the main thread drains doa_burst
-                    # concurrently once a listening window ends.
                     with self.doa_lock:
                         self.doa_burst.append((float(angle), lvl))
-            # Sleep between polls regardless of whether a sample was taken, so
-            # the loop doesn't spin the CPU while waiting to start listening.
             time.sleep(period)
 
     # ---------------------------------------------------------------- pose
@@ -592,6 +592,13 @@ class VAORobuddy(Node):
         self.robot_map_posY = float(tr.y)
         self.robot_map_angZ = float(r.z)
         self.robot_map_angW = float(r.w)
+        # Only record a new trail point once the robot has actually moved, so
+        # standing still through a 3 s listening window does not add hundreds
+        # of duplicate points to every plotted line.
+        if (not self.trail
+                or math.hypot(self.robot_map_posX - self.trail[-1][0],
+                              self.robot_map_posY - self.trail[-1][1]) > 0.02):
+            self.trail.append((self.robot_map_posX, self.robot_map_posY))
         return True
 
     def halt(self):
@@ -652,31 +659,14 @@ class VAORobuddy(Node):
             lambda f: setattr(self, 'nav_active', False))
 
     # ---------------------------------------------------------------- loop
-    # The main control loop
     def control_callback(self):
-        # Ticked by a ROS timer (~10 Hz). Every call re-enters this same
-        # function; the ONLY thing that persists between calls is self.state.
-        # Each state block below does a small amount of work, decides the next
-        # state, and returns -- so a state that's still waiting on something
-        # just returns without changing state, and gets called again next tick.
         now = time.time()
 
-        # ============================================================
-        # STARTUP: wait for the map, then wait for the camera to publish.
-        # ============================================================
-
         if self.state == 'WAIT_MAP':
-            # /map is latched (published once, held by nav2's map_server), so
-            # this fires as soon as a subscription connects to an already-
-            # running map server -- may be immediate or may take a while if
-            # nav2 isn't up yet.
             if self.map_msg is None:
                 self.get_logger().info(f"waiting for {MAP_TOPIC}...",
                                        throttle_duration_sec=5.0)
                 return
-            # Turn the occupancy grid into the belief-map coordinate system:
-            # x_points/z_points, free_mask, and every belief array's initial
-            # (uniform) state. Everything downstream depends on this existing.
             if not rf.build_grid_from_map(self, self.map_msg, GRID_STEP):
                 self.get_logger().warn("map has no free space yet",
                                        throttle_duration_sec=5.0)
@@ -690,8 +680,12 @@ class VAORobuddy(Node):
             return
 
         if self.state == 'WAIT_SENSORS':
-            # RGB and depth arrive on separate topics/callbacks at their own
-            # rate; this just waits until BOTH have delivered at least once.
+            if not self.use_V:
+                # Vision is off for this run -- nothing to wait for. All three
+                # requested modes (VAO/VA/VO) include V, so this only matters
+                # if you ever run 'AO' or 'A' or 'O' alone.
+                self.state = 'INIT_BEGIN'
+                return
             missing = []
             if self.latest_rgb_image is None:
                 missing.append(RGB_TOPIC)
@@ -709,17 +703,7 @@ class VAORobuddy(Node):
             self.state = 'INIT_BEGIN'
             return
 
-        # ============================================================
-        # INITIALIZATION: rotate through INIT_HEADINGS (4) orthogonal
-        # views before search starts, sensing vision/olfaction/audition
-        # at each one. Mirrors the AI2-THOR sim's initial 360 deg scan.
-        # ============================================================
-
         if self.state == 'INIT_BEGIN':
-            # One-time setup: reset the view counter and announce the phase.
-            # self.phase is a separate, human/log-facing label from
-            # self.state -- state drives control flow, phase describes what
-            # stage of the mission this is for logging/analysis.
             self.init_index = 0
             self.phase = 'Initialization'
             self.get_logger().info(
@@ -728,62 +712,42 @@ class VAORobuddy(Node):
             return
 
         if self.state == 'INIT_SENSE':
-            # Get a fresh pose BEFORE sensing, timestamped to match the camera
-            # frame -- if this returns False, TF isn't ready yet, so bail out
-            # and retry next tick rather than sensing with a stale/wrong pose.
             if not self.update_pose(self.latest_rgb_stamp):
                 return
             dets, n_rej = [], 0
             if self.use_V:
-                # Runs YOLO, projects detections into the map frame, updates
-                # the Dirichlet object-class map. n_rej = detections rejected
-                # for having no usable depth.
                 annotated, dets, n_rej = rf.visionBranch(self.yoloModel, self)
                 self.n_depth_rejected += n_rej
                 if annotated is not None:
-                    # Saved with an "init_" prefix and the view index, distinct
-                    # from search-phase "yolo_" frames, so a run's images sort
-                    # into their two phases automatically.
                     cv.imwrite(os.path.join(
                         self.save_dir, f"init_{self.init_index:02d}.jpg"), annotated)
-            # One chemical reading -> updates the source-strength (q_s) belief.
             counts = rf.olfactionBranch(self) if self.use_O else None
             self.get_logger().info(
                 f"--- init view {self.init_index + 1}/{INIT_HEADINGS} @ "
                 f"({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f}) ---")
             self.report_sensing(dets, n_rej, counts)
-            # Stash this view's results; n_doa filled in later if audition runs.
             self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts, n_doa=0,
                                  dets=dets, rx=self.robot_map_posX, ry=self.robot_map_posY)
 
             if self.use_A:
-                # Audition needs the base to be STILL (motor noise would
-                # otherwise dominate the mic), so stop moving and start a
-                # settle-then-listen timer before sensing sound.
                 self.halt()
                 self.listening = False
-                self.listen_from = now + SETTLE_S       # when listening may begin
-                self.phase_until = now + SETTLE_S + LISTEN_S  # when this view ends
+                self.listen_from = now + SETTLE_S
+                self.phase_until = now + SETTLE_S + LISTEN_S
                 self.state = 'INIT_LISTEN'
                 return
 
-            # No microphone on this platform: this view is done, log it now.
             self.log_init_view(self._pending)
             self.state = 'INIT_NEXT'
             return
 
         if self.state == 'INIT_LISTEN':
-            # Two-part timer: SETTLE_S to let the drivetrain fully stop, THEN
-            # LISTEN_S of actually listening. self.listening is read by the
-            # DOA background thread -- it only accepts samples while True.
             if now >= self.listen_from:
                 self.listening = True
             if now < self.phase_until:
-                self.halt()   # keep enforcing zero velocity through the window
+                self.halt()
                 return
             self.listening = False
-            # Drain whatever DOA samples accumulated during the listen window
-            # and fold them into the auditory belief as one update.
             n = rf.auditionBranch(self)
             self._pending['n_doa'] = n
             self.get_logger().info(
@@ -796,14 +760,11 @@ class VAORobuddy(Node):
         if self.state == 'INIT_NEXT':
             self.init_index += 1
             if self.init_index >= INIT_HEADINGS:
-                # All 4 views done -- initialization is over, search begins.
                 self.get_logger().info(
                     "=== INITIALIZATION complete; entering SEARCH ===")
                 self.phase = 'search'
                 self.state = 'SENSE'
                 return
-            # More views to go: rotate 90 degrees (closed-loop, via nav2's
-            # Spin action) before sensing the next one.
             if self.send_spin(INIT_SPIN_RAD):
                 self.state = 'INIT_ROTATE'
             else:
@@ -818,25 +779,15 @@ class VAORobuddy(Node):
             return
 
         if self.state == 'INIT_ROTATE':
-            # Wait for the spin action to finish (self.spin_active is cleared
-            # by its done-callback) or time out.
             if self.spin_active and now < self.spin_deadline:
                 return
             if self.spin_active:
                 self.get_logger().warn("spin action timed out; continuing anyway")
                 self.spin_active = False
-            self.state = 'INIT_SENSE'   # sense the new heading
+            self.state = 'INIT_SENSE'
             return
 
-        # ============================================================
-        # SEARCH: one cycle is sense -> (listen) -> fuse belief -> decide
-        # whether to stop or step toward the current best guess. Repeats
-        # until the fused entropy drops below threshold or MAX_STEPS hits.
-        # ============================================================
-
         if self.state == 'SENSE':
-            # Same per-view sensing as INIT_SENSE, but without the view
-            # counter/rotation bookkeeping -- this is one SEARCH step.
             if not self.update_pose(self.latest_rgb_stamp):
                 return
             dets, n_rej = [], 0
@@ -859,14 +810,10 @@ class VAORobuddy(Node):
                 self.phase_until = now + SETTLE_S + LISTEN_S
                 self.state = 'LISTEN'
             else:
-                # No mic: skip straight to fusing vision + olfaction.
                 self.state = 'FUSE'
             return
 
         if self.state == 'LISTEN':
-            # Identical settle-then-listen pattern to INIT_LISTEN, but for a
-            # search step: also reports the measured LEVEL (search steps care
-            # about range via L0, init views just log sample count).
             if now >= self.listen_from:
                 self.listening = True
             if now < self.phase_until:
@@ -880,9 +827,6 @@ class VAORobuddy(Node):
                 f"  audition   {n} DOA samples over {LISTEN_S:.1f} s while stationary"
                 + (f", level {lvl:.1f} dB" if lvl is not None else
                    ", bearing-only (no level)"))
-            # Diagnostic: if the range-hypothesis posterior has piled up on an
-            # edge value, either the level scale doesn't cover reality or the
-            # array's AGC is flattening genuine level differences.
             if self.sndHyp is not None and self.sndHyp.at_endpoint():
                 self.get_logger().warn(
                     "L0 posterior pegged at a grid edge -- either the level scale "
@@ -891,8 +835,6 @@ class VAORobuddy(Node):
             return
 
         if self.state == 'FUSE':
-            # Combine vision + olfaction + audition into one belief map and
-            # get back the normalised entropy (0 = fully certain, ~1 = flat).
             trig = rf.update_belief(self)
             p = self._pending
             self.log_step(p, trig)
@@ -900,15 +842,11 @@ class VAORobuddy(Node):
                 f"step {self.step}  det={p['n_det']} (rej {p['n_rej']}) "
                 f"doa={p['n_doa']} mq3={p['counts']}  "
                 f"trigger {trig:.3f} (stop at <= {self.entropy_frac})")
-            # Same pegged-posterior diagnostic as above, for the emission-rate
-            # (olfactory) hypothesis instead of the range one.
             if self.olfHyp is not None and self.olfHyp.at_endpoint():
                 self.get_logger().warn(
                     "q_s posterior pegged at a grid edge -- the true emission "
                     "rate is probably outside Q_S_HYPOTHESES")
 
-            # STOPPING CONDITION: entropy low enough (confident) or we've run
-            # out of budget. Either way, commit to the current best cell.
             if trig <= self.entropy_frac or self.step >= MAX_STEPS:
                 tx, tz = rf.fused_peak(self)
                 why = 'converged' if trig <= self.entropy_frac else 'step limit'
@@ -920,18 +858,14 @@ class VAORobuddy(Node):
                 self.state = 'FINISH'
                 return
 
-            # Not confident yet: pick the next place to look and drive there.
             gx, gy, gyaw = rf.pick_goal(self)
             self.state = 'NAVIGATE' if self.send_nav_goal(gx, gy, gyaw) else 'FINISH'
             return
 
         if self.state == 'NAVIGATE':
-            # Waiting for nav2 to finish driving to this step's target.
             if self.nav_active and now < self.nav_deadline:
-                # Vision and olfaction don't need the robot to be still, so
-                # keep sampling periodically WHILE driving -- only audition
-                # requires the halt-and-listen dance, and that only happens
-                # once per SENSE, not during NAVIGATE.
+                # Vision and olfaction keep sampling while driving; only the
+                # microphone is blocked by ego-noise.
                 if now - self.last_sense >= SENSE_PERIOD_S:
                     self.last_sense = now
                     if self.update_pose(self.latest_rgb_stamp):
@@ -942,28 +876,28 @@ class VAORobuddy(Node):
                             rf.olfactionBranch(self)
                 return
             if self.nav_active:
-                # nav_deadline passed but nav2 never finished -- don't get
-                # stuck, treat it as done and move on.
                 self.get_logger().warn("nav goal timed out; continuing")
                 self.nav_active = False
             self.halt()
-            self.step += 1        # one SEARCH step completed
-            self.state = 'SENSE'  # loop back for the next cycle
+            self.step += 1
+            self.state = 'SENSE'
             return
-
-        # ============================================================
-        # GOAL_NAVIGATION: driving to the final answer, set up back in
-        # FUSE. Once nav2 finishes, save everything and stop.
-        # ============================================================
 
         if self.state == 'FINISH':
             if self.nav_active and now < self.nav_deadline:
-                return   # still driving to the final target
+                return
             self.halt()
-            self.save_data()   # writes trajectory_log.csv, run_meta.json, maps
+            self.save_data()
             self.state = 'DONE'
-            return
-            
+            self.get_logger().info("run complete; shutting down")
+            # Actually exit rather than sitting in DONE forever. rclpy.spin()
+            # blocks indefinitely, and a state machine that has stopped
+            # changing state gives it no reason to return -- so raise, and let
+            # main() catch it. SystemExit is the conventional way to break out
+            # of a spin from inside a callback: it unwinds through spin()
+            # rather than being swallowed by the executor's error handling.
+            raise SystemExit
+
     # ---------------------------------------------------------------- reporting
     def report_sensing(self, dets, n_rej, counts):
         """Print what the sensors actually returned this step.
@@ -1019,6 +953,11 @@ class VAORobuddy(Node):
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
             n_doa_samples=p['n_doa'], chemicalConc=p['counts'],
         ))
+        # The object map is already accumulating during initialization, so it
+        # is worth rendering. The BELIEF maps are not -- update_belief has not
+        # run yet, so every branch is still its uniform prior and the panels
+        # would just be blank squares.
+        rf.save_object_map(self, self.init_index, prefix='objects_init')
 
     def log_step(self, p, trig):
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
@@ -1040,18 +979,24 @@ class VAORobuddy(Node):
             L0_map=float(self.sndHyp.map_value()) if self.sndHyp else None,
             level_db=self._current_level_db(),
         ))
+        # Only the arrays this run's modalities actually produced. A uniform
+        # placeholder for a disabled branch wastes space and, worse, reads
+        # later as "this modality ran and learned nothing" rather than "this
+        # modality was switched off".
         np.savez_compressed(
             os.path.join(self.save_dir, f"maps_{self.step:03d}.npz"),
-            fused=self.p_fused, vision=self.p_vis, olfaction=self.p_olf,
-            sound=self.p_snd, free=self.free_mask,
-            x_points=self.x_points, z_points=self.z_points)
+            **rf.belief_arrays_for_saving(self))
+        rf.save_belief_maps(self, self.step)
+        rf.save_object_map(self, self.step)
 
     def save_data(self):
         pd.DataFrame(self.rows).to_csv(
             os.path.join(self.save_dir, 'trajectory_log.csv'), index=False)
         tx, tz = rf.fused_peak(self)
         meta = dict(platform='robuddy', ros_distro='humble',
-                    modalities=self.modalities, steps=self.step + 1,
+                    modalities=self.modalities,
+                    requested_modalities=self.requested_modalities,
+                    steps=self.step + 1,
                     entropy_frac=self.entropy_frac,
                     estimated_source=dict(x=tx, y=tz),
                     peak_object=rf.peak_object_name(self),
@@ -1091,13 +1036,24 @@ def main(args=None):
     node = VAORobuddy()
     try:
         rclpy.spin(node)
+    except SystemExit:
+        # Normal end of run -- FINISH has already halted the base and written
+        # every output, so there is nothing left to do here.
+        node.get_logger().info("exiting cleanly")
     except KeyboardInterrupt:
+        # Ctrl-C partway through: stop the robot and salvage whatever the run
+        # produced rather than losing all of it.
         node.halt()
-        if node.grid_ready:
+        if node.grid_ready and node.state != 'DONE':
             node.save_data()
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # shutdown() raises if the context is already torn down, which happens
+        # on some rclpy versions when SystemExit propagates through spin().
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
