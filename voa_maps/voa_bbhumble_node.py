@@ -136,7 +136,7 @@ DOA_POLL_HZ = 20.0
 # whose depth jumps frame to frame. Lock focus once at startup if you see that.
 CAM_HFOV_DEG = 69.0
 CAM_VFOV_DEG = 55.0
-CAM_HEIGHT_M = 0.25
+CAM_HEIGHT_M = 0.64
 # Detections beyond this are rejected rather than placed at a wrong range.
 # 10 m is generous for an OAK-D S2 -- stereo depth error grows roughly with
 # range squared, so a detection at 10 m may be metres off. Worth watching

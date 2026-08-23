@@ -1,0 +1,29 @@
+{
+  "platform": "robuddy",
+  "ros_distro": "humble",
+  "modalities": "VO",
+  "requested_modalities": "OV",
+  "steps": 4,
+  "entropy_frac": 0.7,
+  "estimated_source": {
+    "x": 0.25,
+    "y": 3.0
+  },
+  "peak_object": "unobserved",
+  "mq3_baseline": 150.0,
+  "depth_rejected": 0,
+  "goal_phrase": "Is emitting smoke odor:",
+  "final_phase": "goal_navigation",
+  "doa_offset_deg": 0.0,
+  "doa_ccw": false,
+  "q_s_map": 4999.999999999995,
+  "q_s_posterior": [
+    0.009508674853218615,
+    0.019916595992007114,
+    0.07430431267683656,
+    0.25039859091566136,
+    0.6458718255622764
+  ],
+  "q_s_pegged": true,
+  "has_sound_level": true
+}
