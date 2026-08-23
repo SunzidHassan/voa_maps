@@ -90,7 +90,16 @@ from . import rosFunctions as rf
 
 # Class axis comes from the loaded model so it can never drift out of sync with
 # what the detector reports. Set to a list only to restrict it to a subset.
-OBJECT_CLASSES = None
+# Restricted to the classes that actually matter in this environment. Two
+# effects, both wanted:
+#   * the Dirichlet object map has 9 real classes instead of COCO's 80, so a
+#     single detection moves a cell's posterior much further;
+#   * YOLO detections of anything else are dropped by visionBranch's CLS_IDX
+#     check rather than being accumulated, so a stray 'bottle' cannot dilute
+#     the semantic map.
+# Set to None to take every class the loaded model reports instead.
+OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+                  'oven', 'sink', 'refrigerator', 'clock']
 
 # --- topics / frames ---
 RGB_TOPIC = '/oak/rgb/image_raw/compressed'
@@ -128,7 +137,12 @@ DOA_POLL_HZ = 20.0
 CAM_HFOV_DEG = 69.0
 CAM_VFOV_DEG = 55.0
 CAM_HEIGHT_M = 0.25
-DEPTH_TRUST_MAX_M = 5.0
+# Detections beyond this are rejected rather than placed at a wrong range.
+# 10 m is generous for an OAK-D S2 -- stereo depth error grows roughly with
+# range squared, so a detection at 10 m may be metres off. Worth watching
+# n_depth_rejected in the log: if it drops to zero, the limit is no longer
+# filtering anything and far detections are landing in wrong cells.
+DEPTH_TRUST_MAX_M = 10.0
 
 # --- grid / planning ---
 GRID_STEP = 0.25
@@ -957,7 +971,14 @@ class VAORobuddy(Node):
         # is worth rendering. The BELIEF maps are not -- update_belief has not
         # run yet, so every branch is still its uniform prior and the panels
         # would just be blank squares.
-        rf.save_object_map(self, self.init_index, prefix='objects_init')
+        # Full diagnostic set for this init view. The BELIEF panels are
+        # included even though update_belief has not run yet -- during
+        # initialization they show the priors, which is the correct baseline to
+        # compare the first search step against.
+        rf.save_object_map(self, self.init_index, prefix='init_objects')
+        rf.save_modality_diagnostics(self, self.init_index, prefix='init_diag')
+        rf.save_vision_class_maps(self, self.init_index,
+                                  prefix='init_vision_classes')
 
     def log_step(self, p, trig):
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
@@ -986,8 +1007,7 @@ class VAORobuddy(Node):
         np.savez_compressed(
             os.path.join(self.save_dir, f"maps_{self.step:03d}.npz"),
             **rf.belief_arrays_for_saving(self))
-        rf.save_belief_maps(self, self.step)
-        rf.save_object_map(self, self.step)
+        rf.save_all_diagnostics(self, self.step)
 
     def save_data(self):
         pd.DataFrame(self.rows).to_csv(

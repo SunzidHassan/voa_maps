@@ -31,7 +31,7 @@ import numpy as np
 
 def load_run(run_dir):
     """Every maps_NNN.npz in a run directory, in step order."""
-    paths = sorted(glob.glob(os.path.join(run_dir, 'maps_*.npz')))
+    paths = sorted(glob.glob(os.path.join(run_dir, 'VO/maps_*.npz')))
     if not paths:
         raise FileNotFoundError(
             f"no maps_*.npz under {run_dir}\n"

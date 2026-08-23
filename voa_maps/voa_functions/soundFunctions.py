@@ -645,7 +645,7 @@ def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM
     if s is None:
         # Fallback keeps the pipeline runnable without the CLAP checkpoint.
         # Text-only, so an audio path degrades to its filename stem.
-        from voa_functions.visionFunction import model as _sbert
+        from .visionFunction import model as _sbert
         from sentence_transformers import util as _util
         text = payload if kind == 'text' else os.path.splitext(os.path.basename(payload))[0]
         q = _sbert.encode(text, convert_to_tensor=True)
@@ -659,7 +659,7 @@ def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM
     # Both vectors feed visual_likelihood_multimodal, so a nonzero score here
     # would leak straight back in through combine_similarity.
     try:
-        from voa_functions.visionFunction import zero_empty_similarity
+        from .visionFunction import zero_empty_similarity
         s = zero_empty_similarity(s)
     except Exception:
         pass
@@ -675,7 +675,7 @@ def sound_semantic_map(beta_objects, sound_query, classes):
     Structurally identical to visual_likelihood, which is what makes the two
     branches directly comparable in the ablation.
     """
-    from voa_functions.visionFunction import object_posterior
+    from .visionFunction import object_posterior
     post = object_posterior(beta_objects)
     sim = class_sound_similarity(sound_query, classes)
     lik = np.tensordot(post, sim, axes=([2], [0]))

@@ -342,7 +342,25 @@ def olfactionBranch(node):
     predictor = hy.olfactory_predictor(
         node.gridX, node.gridZ, node.robot_map_posX, node.robot_map_posY,
         U=0.0, psi_deg=0.0)
-    node.olfHyp.update(predictor, float(np.log(counts)), node.olf_sigma_log)
+    obs = float(np.log(counts))
+
+    # Per-step LIKELIHOOD, kept for the diagnostic plots: what THIS single
+    # reading says about each cell, before it is folded into the accumulated
+    # posterior. Marginalised over the emission-rate hypotheses using their
+    # current weights, so it answers "given what I now believe about source
+    # strength, how well does each cell explain this reading".
+    try:
+        w = node.olfHyp.hypothesis_posterior()
+        sig = max(node.olf_sigma_log, 1e-9)
+        per_hyp = np.stack([-0.5 * ((obs - (v + predictor)) / sig) ** 2
+                            for v in node.olfHyp.values], axis=0)
+        m = per_hyp.max(axis=0)
+        node.olf_loglik_step = m + np.log(
+            np.sum(w[:, None, None] * np.exp(per_hyp - m[None]), axis=0) + 1e-300)
+    except Exception:
+        node.olf_loglik_step = None
+
+    node.olfHyp.update(predictor, obs, node.olf_sigma_log)
     return counts
 
 
@@ -377,6 +395,17 @@ def auditionBranch(node):
                                node.doa_burst_bias_deg))
 
     yaw = quaternion_to_yaw(0, 0, node.robot_map_angZ, node.robot_map_angW)
+
+    # Per-step LIKELIHOOD for the diagnostics: the bearing cone this burst
+    # alone implies, before it is multiplied into the accumulated belief.
+    try:
+        node.snd_loglik_step = sf.bearing_loglik(
+            node.x_points, node.z_points,
+            node.robot_map_posX, node.robot_map_posY,
+            ros_yaw_to_alg_deg(yaw), theta, sigma_deg=sigma_eff)
+    except Exception:
+        node.snd_loglik_step = None
+
     sf.update_sound_map(node.soundLog, node.x_points, node.z_points,
                         node.robot_map_posX, node.robot_map_posY,
                         ros_yaw_to_alg_deg(yaw), theta, sigma_deg=sigma_eff)
@@ -757,3 +786,160 @@ def belief_arrays_for_saving(node):
     if node.use_A:
         out['sound'] = node.p_snd
     return out
+
+# ============================================================= DIAGNOSTICS
+#
+# Per-step likelihood-vs-posterior plots, and the per-class breakdown of the
+# vision object map. These answer "why did the belief move the way it did",
+# which the fused map alone cannot -- a fused peak in the wrong place is
+# uninterpretable until you can see which modality put it there.
+
+def _panel(ax, arr, free, xp, zp, title, cmap='hot', logscale=False):
+    """One normalised heatmap panel with non-free cells left blank."""
+    a = np.asarray(arr, float)
+    if logscale:
+        # Log-likelihood maps span enormous ranges; the max-relative form is
+        # the only readable one, and it is also what actually matters, since
+        # only differences between cells affect the posterior.
+        a = a - a.max()
+        a = np.clip(a, -30.0, 0.0)
+    lo, hi = np.nanmin(a[free]) if free.any() else 0.0, np.nanmax(a[free]) if free.any() else 1.0
+    norm = (a - lo) / (hi - lo) if hi > lo + 1e-12 else np.zeros_like(a)
+    shown = np.where(free, norm, np.nan)
+    extent = [float(np.min(xp)), float(np.max(xp)),
+              float(np.min(zp)), float(np.max(zp))]
+    im = ax.imshow(shown, origin='lower', extent=extent, cmap=cmap,
+                   aspect='equal', vmin=0.0, vmax=1.0)
+    ax.set_title(title, fontsize=9)
+    ax.tick_params(labelsize=7)
+    return im
+
+
+def save_modality_diagnostics(node, step, prefix='diag'):
+    """Likelihood (this step) vs posterior (accumulated), per modality.
+
+    The distinction is the point: the LIKELIHOOD is what the single most
+    recent measurement says on its own, the POSTERIOR is everything the robot
+    has accumulated. When they disagree the belief is being dragged by history
+    rather than by what the sensor just reported, which is exactly the
+    situation worth seeing before trusting a result.
+    """
+    try:
+        xp, zp, free = node.x_points, node.z_points, node.free_mask
+        cols = []
+        if node.use_O:
+            cols.append(('Olfaction', getattr(node, 'olf_loglik_step', None),
+                         node.olfHyp.cell_posterior() if node.olfHyp else None))
+        if node.use_A:
+            post = None
+            try:
+                total = node.soundLog + (node.sndHyp.cell_loglik()
+                                         if node.sndHyp is not None else 0.0)
+                post = sf.sound_posterior(total)
+            except Exception:
+                pass
+            cols.append(('Audition', getattr(node, 'snd_loglik_step', None), post))
+        if not cols:
+            return
+
+        fig, axes = plt.subplots(2, len(cols), figsize=(4.6 * len(cols), 8.0),
+                                 squeeze=False)
+        for j, (name, lik, post) in enumerate(cols):
+            if lik is not None:
+                im = _panel(axes[0][j], lik, free, xp, zp,
+                            f"{name} -- likelihood (this step)", logscale=True)
+                fig.colorbar(im, ax=axes[0][j], fraction=0.046, pad=0.04)
+            else:
+                axes[0][j].set_title(f"{name} -- no measurement this step", fontsize=9)
+                axes[0][j].axis('off')
+            if post is not None:
+                im = _panel(axes[1][j], post, free, xp, zp,
+                            f"{name} -- posterior (accumulated)")
+                fig.colorbar(im, ax=axes[1][j], fraction=0.046, pad=0.04)
+            else:
+                axes[1][j].axis('off')
+            for ax in (axes[0][j], axes[1][j]):
+                if ax.axison:
+                    _draw_trail(ax, node)
+
+        fig.suptitle(f"{node.phase}  step {step}  [{node.modalities}]", fontsize=11)
+        fig.tight_layout()
+        fig.savefig(os.path.join(node.save_dir, f"{prefix}_{step:03d}.png"), dpi=110)
+        plt.close(fig)
+    except Exception as e:
+        node.get_logger().warn(f"modality diagnostics failed at step {step}: {e}")
+        plt.close('all')
+
+
+def save_vision_class_maps(node, step, prefix='vision_classes'):
+    """Per-class breakdown of the Dirichlet object map.
+
+    One panel per object class plus the two special layers:
+      'empty floor' -- the class the free-space update accumulates into
+      'unobserved'  -- derived, not a class: cells no evidence has reached.
+                       These carry the prior, so a high per-class value there
+                       means nothing has been seen, not that the class is
+                       present.
+
+    Two rows per class: accumulated Dirichlet EVIDENCE (raw counts, what has
+    actually been observed) and the normalised POSTERIOR (what the map
+    believes). Evidence shows coverage; posterior shows conclusions, and a
+    cell with a confident posterior but near-zero evidence is one the prior is
+    speaking for rather than the sensor.
+    """
+    try:
+        if node.objectMap is None:
+            return
+        xp, zp, free = node.x_points, node.z_points, node.free_mask
+        beta = node.objectMap
+        post = vf.object_posterior(beta)
+        observed = vf.observed_mask(beta)
+        classes = list(vf.CLASSES)
+
+        # Prior mass per class, subtracted so 'evidence' means observations
+        # rather than the constant every cell starts with.
+        prior_per_class = vf.PRIOR_STRENGTH * vf.PRIOR
+
+        n = len(classes) + 1                       # + the derived 'unobserved'
+        ncol = min(5, n)
+        nrow = int(np.ceil(n / ncol))
+        fig, axes = plt.subplots(2 * nrow, ncol,
+                                 figsize=(3.0 * ncol, 5.6 * nrow), squeeze=False)
+        for a in axes.ravel():
+            a.axis('off')
+
+        for i, cname in enumerate(classes):
+            r, c = divmod(i, ncol)
+            ax_e, ax_p = axes[2 * r][c], axes[2 * r + 1][c]
+            ax_e.axis('on'); ax_p.axis('on')
+            ev = np.maximum(beta[:, :, i] - prior_per_class[i], 0.0)
+            _panel(ax_e, ev, free, xp, zp, f"{cname}\nevidence", cmap='viridis')
+            _panel(ax_p, post[:, :, i], free, xp, zp, f"{cname}\nposterior")
+
+        # 'unobserved' is a MASK, not a class -- shown last so the distinction
+        # is visible rather than implied.
+        r, c = divmod(len(classes), ncol)
+        ax_u = axes[2 * r][c]
+        ax_u.axis('on')
+        _panel(ax_u, (~observed).astype(float), free, xp, zp,
+               "unobserved\n(no evidence yet)", cmap='gray')
+
+        fig.suptitle(f"vision object map by class -- {node.phase} step {step}",
+                     fontsize=12)
+        fig.tight_layout()
+        fig.savefig(os.path.join(node.save_dir, f"{prefix}_{step:03d}.png"), dpi=100)
+        plt.close(fig)
+    except Exception as e:
+        node.get_logger().warn(f"vision class maps failed at step {step}: {e}")
+        plt.close('all')
+
+
+def save_all_diagnostics(node, step, prefix=''):
+    """Everything for one step: belief panels, object map, per-modality
+    likelihood/posterior, and the per-class vision breakdown."""
+    tag = f"{prefix}" if prefix else ""
+    save_belief_maps(node, step, prefix=f"{tag}maps" if tag else "maps")
+    save_object_map(node, step, prefix=f"{tag}objects" if tag else "objects")
+    save_modality_diagnostics(node, step, prefix=f"{tag}diag" if tag else "diag")
+    save_vision_class_maps(node, step,
+                           prefix=f"{tag}vision_classes" if tag else "vision_classes")
