@@ -128,7 +128,7 @@ DOA_POLL_HZ = 20.0
 CAM_HFOV_DEG = 69.0
 CAM_VFOV_DEG = 55.0
 CAM_HEIGHT_M = 0.25
-DEPTH_TRUST_MAX_M = 2.0
+DEPTH_TRUST_MAX_M = 5.0
 
 # --- grid / planning ---
 GRID_STEP = 0.25
@@ -204,7 +204,7 @@ W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
 ENTROPY_FRAC = 0.7
 MAX_STEPS = 3
 
-# --- initialization phase: 4 orthogonal egocentric views before search ---
+# --- initialization phase: 5 egocentric views before search ---
 # Mirrors initialize_envKnowledge in the AI2-THOR simulation, which rotates
 # 4x90 degrees and calls the vision branch at each stop before search begins.
 # Doing this on hardware too means the object map starts with a real look
@@ -212,8 +212,8 @@ MAX_STEPS = 3
 # see, and it gives olfaction (and audition, if fitted) an initial reading
 # from every direction rather than just the one the robot happened to be
 # facing at startup.
-INIT_HEADINGS = 4
-INIT_SPIN_RAD = math.pi / 2.0     # 90 degrees, closed-loop via nav2's Spin action
+INIT_HEADINGS = 6
+INIT_SPIN_RAD = math.pi / 3     # 90 degrees, closed-loop via nav2's Spin action
 SPIN_TIMEOUT_S = 15.0
 FREE_EVIDENCE = 3.0
 
