@@ -136,13 +136,20 @@ DOA_POLL_HZ = 20.0
 # whose depth jumps frame to frame. Lock focus once at startup if you see that.
 CAM_HFOV_DEG = 69.0
 CAM_VFOV_DEG = 55.0
-CAM_HEIGHT_M = 0.64
+CAM_HEIGHT_M = 0.25
 # Detections beyond this are rejected rather than placed at a wrong range.
 # 10 m is generous for an OAK-D S2 -- stereo depth error grows roughly with
 # range squared, so a detection at 10 m may be metres off. Worth watching
 # n_depth_rejected in the log: if it drops to zero, the limit is no longer
 # filtering anything and far detections are landing in wrong cells.
 DEPTH_TRUST_MAX_M = 10.0
+# Free-space ("looked, saw nothing") range. Kept separate from the detection
+# limit on purpose: a detection at 8 m is a real observation with a noisy
+# range, but claiming every cell out to 8 m is EMPTY on the strength of one
+# frame is a much stronger assertion, and wrong wherever an object is occluded
+# or simply missed. Raise it toward DEPTH_TRUST_MAX_M if coverage matters more
+# than caution.
+FREE_RANGE_M = 10.0
 
 # --- grid / planning ---
 GRID_STEP = 0.25
@@ -211,7 +218,22 @@ SND_SIGMA_DB = 7.5
 # warm-up state changes -- it is not re-checked at runtime.
 MQ3_BASELINE = 150.0
 
-Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(3, np.log10(5000), 5))
+# Emission-rate hypotheses, in the plume model's units. THE SPAN IS THE THING
+# THAT MATTERS, not the number of points.
+#
+# c(r) = q_s / (4 pi D r), so the largest hypothesis sets a hard CEILING on how
+# far away the source can possibly be judged to be:
+#       r_max = q_s_max / (4 pi D c)
+# With the old ceiling of 5000 and D=10, a reading of 200 net counts could only
+# be explained by a source at 0.20 m -- no cell farther away had any hypothesis
+# that could produce that reading, so the posterior collapsed to a tight blob
+# right next to the robot regardless of where the source actually was. That is
+# a grid artefact, not evidence.
+#
+# 1e3..1e6 lets 200 counts be explained anywhere from 0.2 m to ~200 m, which
+# comfortably covers a room. Watch the q_s_pegged flag in run_meta: if the
+# posterior still piles onto the top hypothesis, widen further.
+Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(3, 6, 7))
 
 # --- fusion / termination ---
 W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
@@ -226,9 +248,28 @@ MAX_STEPS = 3
 # see, and it gives olfaction (and audition, if fitted) an initial reading
 # from every direction rather than just the one the robot happened to be
 # facing at startup.
+# 6 headings x 60 deg. With a 69 deg HFOV that overlaps by 9 deg; 4 x 90 deg
+# would leave a 21 deg blind wedge between consecutive views, wide enough to
+# hide an object entirely at range.
 INIT_HEADINGS = 6
-INIT_SPIN_RAD = math.pi / 3     # 90 degrees, closed-loop via nav2's Spin action
+INIT_SPIN_RAD = 2.0 * math.pi / INIT_HEADINGS   # closed-loop via nav2's Spin
 SPIN_TIMEOUT_S = 15.0
+
+# Frames captured at each heading AFTER the base has stopped. Several frames
+# per view costs about a second and removes the single-frame failures that
+# dominate real runs: residual rocking, autofocus still hunting, and YOLO
+# simply missing an object in one frame that it catches in the next.
+PHOTOS_PER_VIEW = 3
+PHOTO_INTERVAL_S = 0.35
+# Settle time before the FIRST frame at a new heading. Separate from SETTLE_S
+# (which exists for the microphone) because the camera needs less: it only has
+# to stop moving, not wait for drivetrain noise to die away.
+CAMERA_SETTLE_S = 0.6
+
+# Whether SEARCH also does a full rotation at each waypoint, not just
+# initialization. Without it the object map only ever sees whichever direction
+# the robot happened to be facing when nav2 finished driving.
+SCAN_DURING_SEARCH = True
 FREE_EVIDENCE = 3.0
 
 
@@ -315,6 +356,10 @@ class VAORobuddy(Node):
         self.cam_height_m = CAM_HEIGHT_M
         self.depth_trust_max_m = DEPTH_TRUST_MAX_M
         self.free_evidence = FREE_EVIDENCE
+        # How far "I looked here and saw nothing" is trusted. Previously fixed
+        # at visionFunction's 2.5 m default, which is why the object map only
+        # ever updated within ~3 m of the robot even with a 10 m depth limit.
+        self.free_range_m = FREE_RANGE_M
         self.nav_step_m = NAV_STEP_M
         self.olf_sigma_log = OLF_SIGMA_LOG
         self.q_s_hypotheses = Q_S_HYPOTHESES
@@ -447,6 +492,12 @@ class VAORobuddy(Node):
         # environments group the same way in analysis.
         self.phase = 'Initialization'
         self.init_index = 0
+        self.camera_settle_until = 0.0
+        self.scan_index = 0
+        # Set once a waypoint's rotation is done and cleared after the next
+        # navigation leg, so each search step scans exactly once instead of
+        # re-entering the scan forever.
+        self.scan_done = False
         self.spin_active = False
         self.spin_deadline = 0.0
 
@@ -726,15 +777,22 @@ class VAORobuddy(Node):
             return
 
         if self.state == 'INIT_SENSE':
+            # Hold still and let the camera settle BEFORE capturing. Frames
+            # grabbed while the base is still rocking after a spin are the
+            # motion-blurred ones.
+            self.halt()
+            if self.camera_settle_until == 0.0:
+                self.camera_settle_until = now + CAMERA_SETTLE_S
+                return
+            if now < self.camera_settle_until:
+                return
+            self.camera_settle_until = 0.0
+
             if not self.update_pose(self.latest_rgb_stamp):
                 return
             dets, n_rej = [], 0
             if self.use_V:
-                annotated, dets, n_rej = rf.visionBranch(self.yoloModel, self)
-                self.n_depth_rejected += n_rej
-                if annotated is not None:
-                    cv.imwrite(os.path.join(
-                        self.save_dir, f"init_{self.init_index:02d}.jpg"), annotated)
+                dets, n_rej = self.capture_views(f"init_{self.init_index:02d}")
             counts = rf.olfactionBranch(self) if self.use_O else None
             self.get_logger().info(
                 f"--- init view {self.init_index + 1}/{INIT_HEADINGS} @ "
@@ -801,16 +859,71 @@ class VAORobuddy(Node):
             self.state = 'INIT_SENSE'
             return
 
+        if self.state == 'SEARCH_SCAN_SENSE':
+            self.halt()
+            if self.camera_settle_until == 0.0:
+                self.camera_settle_until = now + CAMERA_SETTLE_S
+                return
+            if now < self.camera_settle_until:
+                return
+            self.camera_settle_until = 0.0
+            if not self.update_pose(self.latest_rgb_stamp):
+                return
+            self.capture_views(f"scan_{self.step:03d}_{self.scan_index:02d}")
+            self.get_logger().info(
+                f"  scan view {self.scan_index + 1}/{INIT_HEADINGS} "
+                f"@ ({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f})")
+            self.state = 'SEARCH_SCAN_NEXT'
+            return
+
+        if self.state == 'SEARCH_SCAN_NEXT':
+            self.scan_index += 1
+            if self.scan_index >= INIT_HEADINGS:
+                # Rotation done -- fall through to the normal sensing step,
+                # which will not re-enter the scan because scan_done is set.
+                self.state = 'SENSE'
+                return
+            if self.send_spin(INIT_SPIN_RAD):
+                self.state = 'SEARCH_SCAN_ROTATE'
+            else:
+                self.get_logger().warn(
+                    "cannot rotate mid-search; continuing at the current heading")
+                self.state = 'SENSE'
+            return
+
+        if self.state == 'SEARCH_SCAN_ROTATE':
+            if self.spin_active and now < self.spin_deadline:
+                return
+            if self.spin_active:
+                self.get_logger().warn("scan spin timed out; continuing anyway")
+                self.spin_active = False
+            self.state = 'SEARCH_SCAN_SENSE'
+            return
+
         if self.state == 'SENSE':
+            # A full rotation at this waypoint before sensing, so the object
+            # map gets all round rather than only the heading nav2 left the
+            # robot facing. Reuses the initialization scan states; scan_index
+            # is reset here and SCAN_RETURN sends control back to SENSE_DO.
+            if SCAN_DURING_SEARCH and self.use_V and not self.scan_done:
+                self.scan_index = 0
+                self.scan_done = True
+                self.state = 'SEARCH_SCAN_SENSE'
+                return
+
+            self.halt()
+            if self.camera_settle_until == 0.0:
+                self.camera_settle_until = now + CAMERA_SETTLE_S
+                return
+            if now < self.camera_settle_until:
+                return
+            self.camera_settle_until = 0.0
+
             if not self.update_pose(self.latest_rgb_stamp):
                 return
             dets, n_rej = [], 0
             if self.use_V:
-                annotated, dets, n_rej = rf.visionBranch(self.yoloModel, self)
-                self.n_depth_rejected += n_rej
-                if annotated is not None:
-                    cv.imwrite(os.path.join(self.save_dir,
-                                            f"yolo_{self.step:03d}.jpg"), annotated)
+                dets, n_rej = self.capture_views(f"yolo_{self.step:03d}")
             counts = rf.olfactionBranch(self) if self.use_O else None
             self.report_sensing(dets, n_rej, counts)
             self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts,
@@ -894,6 +1007,7 @@ class VAORobuddy(Node):
                 self.nav_active = False
             self.halt()
             self.step += 1
+            self.scan_done = False      # allow one scan at the new waypoint
             self.state = 'SENSE'
             return
 
@@ -911,6 +1025,73 @@ class VAORobuddy(Node):
             # of a spin from inside a callback: it unwinds through spin()
             # rather than being swallowed by the executor's error handling.
             raise SystemExit
+
+    # ---------------------------------------------------------------- capture
+    def capture_views(self, tag):
+        """Run vision over several DISTINCT frames at the current heading.
+
+        Each accepted frame is folded into the object map separately, so N
+        frames deposit N units of Dirichlet evidence at a detected cell. That
+        is the point: a detection YOLO finds in 2 of 3 frames accumulates real
+        weight, while a single-frame false positive is outvoted rather than
+        being treated as established fact.
+
+        FRAME FRESHNESS IS ENFORCED. The camera callback runs on its own
+        thread, so simply calling visionBranch three times in a row can process
+        the SAME buffered image three times -- which would triple-count one
+        observation and manufacture confidence out of nothing. Each iteration
+        waits for the RGB timestamp to change, and a frame that never arrives
+        is skipped rather than counted again.
+
+        Only the last annotated frame is written to disk; writing all of them
+        multiplies the image count for little extra information.
+
+        Assumes the base is already stopped. The scan states halt and settle
+        first -- capturing mid-drive is what produced the blurred frames.
+        """
+        all_dets, total_rej, annotated = [], 0, None
+        n_used, n_stale = 0, 0
+        last_stamp = None
+
+        for i in range(max(1, PHOTOS_PER_VIEW)):
+            if i > 0:
+                # Wait for genuinely new pixels, not just a fixed delay.
+                deadline = time.time() + PHOTO_INTERVAL_S + 0.5
+                while time.time() < deadline:
+                    if self._rgb_stamp_key() != last_stamp:
+                        break
+                    time.sleep(0.02)
+                else:
+                    # Timed out with no new frame. Counting the old one again
+                    # would be inventing evidence, so skip this slot.
+                    n_stale += 1
+                    continue
+                self.update_pose(self.latest_rgb_stamp)
+
+            last_stamp = self._rgb_stamp_key()
+            ann, dets, n_rej = rf.visionBranch(self.yoloModel, self)
+            total_rej += n_rej
+            all_dets.extend(dets)
+            n_used += 1
+            if ann is not None:
+                annotated = ann
+
+        self.n_depth_rejected += total_rej
+        if annotated is not None:
+            cv.imwrite(os.path.join(self.save_dir, f"{tag}.jpg"), annotated)
+        if n_stale:
+            self.get_logger().warn(
+                f"{tag}: only {n_used}/{PHOTOS_PER_VIEW} frames were new "
+                f"({n_stale} stale, skipped rather than double-counted) -- "
+                f"the camera may be publishing slower than PHOTO_INTERVAL_S")
+        return all_dets, total_rej
+
+    def _rgb_stamp_key(self):
+        """Hashable identity of the current RGB frame, for freshness checks."""
+        st = self.latest_rgb_stamp
+        if st is None:
+            return None
+        return (getattr(st, 'sec', None), getattr(st, 'nanosec', None))
 
     # ---------------------------------------------------------------- reporting
     def report_sensing(self, dets, n_rej, counts):
@@ -965,6 +1146,9 @@ class VAORobuddy(Node):
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
+            yolo_raw=(getattr(self, 'last_vision_counts', {}) or {}).get('raw'),
+            det_no_depth=(getattr(self, 'last_vision_counts', {}) or {}).get('no_depth'),
+            det_off_class=(getattr(self, 'last_vision_counts', {}) or {}).get('unknown_class'),
             n_doa_samples=p['n_doa'], chemicalConc=p['counts'],
         ))
         # The object map is already accumulating during initialization, so it
@@ -987,6 +1171,9 @@ class VAORobuddy(Node):
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
+            yolo_raw=(getattr(self, 'last_vision_counts', {}) or {}).get('raw'),
+            det_no_depth=(getattr(self, 'last_vision_counts', {}) or {}).get('no_depth'),
+            det_off_class=(getattr(self, 'last_vision_counts', {}) or {}).get('unknown_class'),
             best_detection=(max(p.get('dets') or [], key=lambda d: d['sim'],
                                 default={}).get('class_name')),
             best_sim=(max((d['sim'] for d in (p.get('dets') or [])),

@@ -257,10 +257,17 @@ def visionBranch(model, node, confThr=0.3):
         node.get_logger().warn(f"similarity lookup failed: {e}")
 
     det_cells, detections, n_rejected, unknown = [], [], 0, set()
+    # Counters that distinguish the ways a detection can fail to land. Without
+    # these, "no detections" is ambiguous between YOLO finding nothing and
+    # YOLO finding plenty that all get dropped downstream -- which look
+    # identical in the log and have completely different fixes.
+    n_raw = 0          # YOLO boxes above the confidence threshold
+    n_no_depth = 0     # box had no valid depth pixels at all
     for box in results[0].boxes:
         confidence = float(box.conf[0].item())
         if confidence < confThr:
             continue
+        n_raw += 1
         className = model.names[int(box.cls[0].item())]
         # A class the detector reports but the object map does not know falls
         # straight through update_object_map's CLS_IDX lookup and contributes
@@ -273,6 +280,10 @@ def visionBranch(model, node, confThr=0.3):
         x, y, w, h = [float(v) for v in box.xywh[0]]
         x_glob, y_glob, z_glob, d = coord23D(int(x), int(y), int(w), int(h), node)
         if d <= 0.0:
+            # No valid depth in the box: the stereo pair found no match there
+            # (textureless surface, too close, too far, or occluded). Silently
+            # dropped before this counter existed.
+            n_no_depth += 1
             continue
         if d > node.depth_trust_max_m:
             n_rejected += 1
@@ -299,7 +310,18 @@ def visionBranch(model, node, confThr=0.3):
                          ros_yaw_to_alg_deg(yaw),
                          detected_cells=det_cells,
                          fov_deg=node.cam_hfov_deg,
+                         max_range=getattr(node, 'free_range_m', 2.5),
                          evidence=node.free_evidence)
+    # Expose the breakdown so the log can tell these apart.
+    node.last_vision_counts = dict(raw=n_raw, no_depth=n_no_depth,
+                                   too_far=n_rejected, unknown_class=len(unknown),
+                                   used=len(detections))
+    if n_raw and not detections:
+        node.get_logger().warn(
+            f"vision: YOLO found {n_raw} box(es) but NONE landed -- "
+            f"{n_no_depth} had no valid depth, {n_rejected} beyond "
+            f"{node.depth_trust_max_m} m, {len(unknown)} off-class")
+
     if unknown:
         node.get_logger().warn(
             f"detector reported {sorted(unknown)} which are NOT in the object "
@@ -795,7 +817,19 @@ def belief_arrays_for_saving(node):
 # uninterpretable until you can see which modality put it there.
 
 def _panel(ax, arr, free, xp, zp, title, cmap='hot', logscale=False):
-    """One normalised heatmap panel with non-free cells left blank."""
+    """One heatmap panel, normalised to ITS OWN min/max over free cells.
+
+    EVERY PANEL IS SCALED INDEPENDENTLY. Bright means "highest value in this
+    panel", not "high in absolute terms" -- so a class with no detections at
+    all still shows structure, because its tiny prior differences get stretched
+    across the full colour range. Compare panels by WHERE the bright region is,
+    never by how bright two different panels look.
+
+    Colour key, consistent across every plot this module produces:
+        bright / white  = highest value in this panel
+        dark / black    = lowest value in this panel
+        flat grey       = not free space (wall or unmapped); no value at all
+    """
     a = np.asarray(arr, float)
     if logscale:
         # Log-likelihood maps span enormous ranges; the max-relative form is
@@ -808,7 +842,13 @@ def _panel(ax, arr, free, xp, zp, title, cmap='hot', logscale=False):
     shown = np.where(free, norm, np.nan)
     extent = [float(np.min(xp)), float(np.max(xp)),
               float(np.min(zp)), float(np.max(zp))]
-    im = ax.imshow(shown, origin='lower', extent=extent, cmap=cmap,
+    # Non-free cells are NaN. Matplotlib renders NaN as the figure background
+    # (white), which in 'hot' is indistinguishable from the MAXIMUM value --
+    # so walls looked like the most likely place for the source. Give NaN an
+    # explicit neutral grey instead.
+    cm_obj = plt.get_cmap(cmap).copy()
+    cm_obj.set_bad(color='#9a9a9a')
+    im = ax.imshow(shown, origin='lower', extent=extent, cmap=cm_obj,
                    aspect='equal', vmin=0.0, vmax=1.0)
     ax.set_title(title, fontsize=9)
     ax.tick_params(labelsize=7)
@@ -913,7 +953,7 @@ def save_vision_class_maps(node, step, prefix='vision_classes'):
             ax_e, ax_p = axes[2 * r][c], axes[2 * r + 1][c]
             ax_e.axis('on'); ax_p.axis('on')
             ev = np.maximum(beta[:, :, i] - prior_per_class[i], 0.0)
-            _panel(ax_e, ev, free, xp, zp, f"{cname}\nevidence", cmap='viridis')
+            _panel(ax_e, ev, free, xp, zp, f"{cname}\nevidence")
             _panel(ax_p, post[:, :, i], free, xp, zp, f"{cname}\nposterior")
 
         # 'unobserved' is a MASK, not a class -- shown last so the distinction
@@ -922,7 +962,7 @@ def save_vision_class_maps(node, step, prefix='vision_classes'):
         ax_u = axes[2 * r][c]
         ax_u.axis('on')
         _panel(ax_u, (~observed).astype(float), free, xp, zp,
-               "unobserved\n(no evidence yet)", cmap='gray')
+               "unobserved = bright\n(no evidence yet)")
 
         fig.suptitle(f"vision object map by class -- {node.phase} step {step}",
                      fontsize=12)
