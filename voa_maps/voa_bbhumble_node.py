@@ -154,6 +154,13 @@ FREE_RANGE_M = 10.0
 # --- grid / planning ---
 GRID_STEP = 0.25
 NAV_STEP_M = 0.75
+# How far short of the target the robot stops. The belief peak usually lands ON
+# an object, and driving to that cell means driving into it -- snapping the
+# goal to a "free" cell does not help, because objects added since the map was
+# built are free on paper and solid in reality. A standoff also keeps the
+# object inside the camera frustum instead of against the lens.
+# Should exceed the robot's footprint radius plus nav2's inflation.
+STANDOFF_M = 0.5
 NAV_TIMEOUT_S = 10.0
 SETTLE_S = 1.5
 SENSE_PERIOD_S = 1.0
@@ -341,7 +348,10 @@ class VAORobuddy(Node):
         # AI2-THOR simulation's ablation strings ('VAO', 'VA', 'VO', ...).
         # Hardware availability can still veto A even if requested (see the
         # ReSpeaker probe below); V and O are software-only toggles.
-        requested = ''.join(sorted(set(gp('modalities').upper()) & set('VAO')))
+        # Canonical V,A,O order rather than alphabetical, so the string in the
+        # log reads 'VAO'/'VO' as written rather than 'AOV'/'OV'.
+        _req = set(gp('modalities').upper()) & set('VAO')
+        requested = ''.join(c for c in 'VAO' if c in _req)
         if not requested:
             self.get_logger().warn(
                 f"modalities={gp('modalities')!r} contains none of V/A/O; "
@@ -361,6 +371,7 @@ class VAORobuddy(Node):
         # ever updated within ~3 m of the robot even with a 10 m depth limit.
         self.free_range_m = FREE_RANGE_M
         self.nav_step_m = NAV_STEP_M
+        self.standoff_m = STANDOFF_M
         self.olf_sigma_log = OLF_SIGMA_LOG
         self.q_s_hypotheses = Q_S_HYPOTHESES
         # Wide, because an RMS-derived dB has an arbitrary offset: the grid has
@@ -981,7 +992,14 @@ class VAORobuddy(Node):
                     f"{why}; peak is {rf.peak_object_name(self)} at "
                     f"({tx:.2f}, {tz:.2f}); driving there and terminating")
                 self.phase = 'goal_navigation'
-                self.send_nav_goal(tx, tz, math.atan2(tz - p['ry'], tx - p['rx']))
+                # Approach to STANDOFF_M and face it, rather than driving onto
+                # the cell. Uncapped: this is the final leg, so there is no
+                # reason to stop part-way.
+                gx, gy, gyaw = rf.standoff_goal(self, tx, tz)
+                self.get_logger().info(
+                    f"  approaching to within {self.standoff_m:.2f} m -> "
+                    f"({gx:.2f}, {gy:.2f})")
+                self.send_nav_goal(gx, gy, gyaw)
                 self.state = 'FINISH'
                 return
 

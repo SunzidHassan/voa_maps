@@ -1,43 +1,40 @@
 #!/usr/bin/env python3
 """
-voa_TB4Jazzy_node.py  --  VAO source localisation on TurtleBot4 Pro (ROS2 Jazzy).
+voa_tb4jazzy_node.py  --  VO source localisation on TurtleBot4 Pro (ROS2 Jazzy).
 
     ros2 run voa_maps tb4_node
     ros2 run voa_maps tb4_node --ros-args -p goal_phrase:="rotten food smell"
 
-Control only: ROS interfaces, callbacks, and the state machine. All the sensor
-maths lives in rosFunctions.py (shared with Robuddy), and inference lives in
+    # Modality ablation -- same convention as the AI2-THOR sim's MODALITY_SETS
+    ros2 run voa_maps tb4_node --ros-args -p modalities:=VAO   # all three senses
+    ros2 run voa_maps tb4_node --ros-args -p modalities:=VA    # vision + audition
+    ros2 run voa_maps tb4_node --ros-args -p modalities:=VO    # vision + olfaction
+
+Sibling of voa_TB4Jazzy_node.py. Control only: ROS interfaces, callbacks and the
+state machine. Sensor maths is in rosFunctions.py (shared with the TurtleBot4); inference is in
 voa_functions/ unchanged from the AI2-THOR runs.
 
-Topics, frames and the compressedDepth header offset are taken from
-turtlebot_subpub_01. Note this robot publishes map -> base_footprint, not
-base_link.
 
-CYCLE
------
-    SENSE -> FUSE -> NAVIGATE -> SENSE ...
-
-nav2 goals are asynchronous, so vision and olfaction keep sampling at
-SENSE_PERIOD_S while the base drives. There is no LISTEN phase because this
-robot has no microphone -- see voa_BBHumble_node, where audition requires
-stopping so the array does not hear the drive motors.
 
 BEFORE THE FIRST RUN
 --------------------
-1. Start this node BEFORE opening the odour source. The first
-   MQ3_BASELINE_SAMPLES readings are taken as clean air; if the plume is
-   already present the baseline absorbs it and olfaction contributes nothing.
-2. Confirm map -> base_footprint exists, i.e. nav2 is running with a map and
-   not just odometry. A belief accumulated in odom smears as the run goes on.
-3. This robot is VO by construction: no microphone array, so no auditory
-   branch and nothing to calibrate.
+1. Confirm MQ3_BASELINE (currently 150 counts) matches this sensor's actual
+   chemical-free reading before trusting olfaction. It is a fixed constant,
+   not measured at startup -- if the room, sensor, or heater warm-up state has
+   drifted from when it was last measured, every reading is off by a constant
+   and the emission-rate hypotheses will be pegged or biased accordingly.
+2. Confirm map -> base_link exists, i.e. nav2 is running with a map. The
+   assistant controller reads odom -> base_link, which drifts; a belief
+   accumulated in odom smears as the run goes on.
+3. This robot is VO by construction: no microphone array, so there is no
+   auditory branch and nothing to calibrate for it.
 """
 
 import os
 import json
 import math
 import time
-import threading
+import struct
 from datetime import datetime
 
 import numpy as np
@@ -67,19 +64,22 @@ from . import rosFunctions as rf
 
 # ============================================================= CONFIG
 
-# The object map's class axis is taken FROM THE LOADED MODEL by default, so it
-# can never drift out of sync with what the detector actually reports. Set this
-# to a list only if you want to restrict the axis to a subset.
-#
-# Leaving it None works for both cases: a stock COCO checkpoint contributes its
-# 80 classes, a fine-tuned checkpoint contributes its own. Hardcoding a list
-# that disagrees with model.names makes every detection fall through the
-# CLS_IDX lookup and the object map silently never moves.
-OBJECT_CLASSES = None
+# Class axis comes from the loaded model so it can never drift out of sync with
+# what the detector reports. Set to a list only to restrict it to a subset.
+# Restricted to the classes that actually matter in this environment. Two
+# effects, both wanted:
+#   * the Dirichlet object map has 9 real classes instead of COCO's 80, so a
+#     single detection moves a cell's posterior much further;
+#   * YOLO detections of anything else are dropped by visionBranch's CLS_IDX
+#     check rather than being accumulated, so a stray 'bottle' cannot dilute
+#     the semantic map.
+# Set to None to take every class the loaded model reports instead.
+# Only V and O exist on this platform. Kept as a parameter for symmetry with
+# the Robuddy node and so an ablation can still run vision-only.
+DEFAULT_MODALITIES = 'VO'
 
-# Kept for reference -- the fine-tuned lab checkpoint's classes.
-LAB_CLASSES = ['Cardboard box', 'Coke can', 'First aid box',
-               'Humidifier', 'Humidifier box', 'Water bottle']
+OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+                  'oven', 'sink', 'refrigerator', 'clock']
 
 # --- topics / frames ---
 RGB_TOPIC = '/oakd/rgb/image_raw/compressed'
@@ -93,13 +93,10 @@ CMD_VEL_TOPIC = '/cmd_vel'
 MAP_FRAME = 'map'
 BASE_FRAME = 'base_footprint'
 
-# nav2's map_server LATCHES /map: it publishes once at startup with
-# TRANSIENT_LOCAL durability. A default (VOLATILE) subscription is an
-# incompatible QoS match -- it is created without any error, `ros2 topic list`
-# shows the topic, and the callback simply never fires, because the message was
-# published before this node existed and VOLATILE subscribers are not offered
-# the cached sample. Every other subscriber on this robot (local_costmap,
-# global_costmap, amcl, rviz2) uses TRANSIENT_LOCAL for exactly this reason.
+# nav2's map_server LATCHES /map with TRANSIENT_LOCAL durability. A default
+# (VOLATILE) subscription is an incompatible QoS match: it is created without
+# error, the topic shows in `ros2 topic list`, and the callback simply never
+# fires because the message was published before this node existed.
 MAP_QOS = QoSProfile(
     depth=1,
     history=QoSHistoryPolicy.KEEP_LAST,
@@ -107,39 +104,73 @@ MAP_QOS = QoSProfile(
     durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
 )
 
-# --- OAK-D Pro ---
+# --- OAK-D S2 ---
+# Autofocus hunts on flat, low-texture surfaces, which shows up as a detection
+# whose depth jumps frame to frame. Lock focus once at startup if you see that.
 CAM_HFOV_DEG = 66.0
 CAM_VFOV_DEG = 54.0
 CAM_HEIGHT_M = 0.25
-DEPTH_TRUST_MAX_M = 2.0
+# Detections beyond this are rejected rather than placed at a wrong range.
+# 10 m is generous for an OAK-D S2 -- stereo depth error grows roughly with
+# range squared, so a detection at 10 m may be metres off. Worth watching
+# n_depth_rejected in the log: if it drops to zero, the limit is no longer
+# filtering anything and far detections are landing in wrong cells.
+DEPTH_TRUST_MAX_M = 10.0
+# Free-space ("looked, saw nothing") range. Kept separate from the detection
+# limit on purpose: a detection at 8 m is a real observation with a noisy
+# range, but claiming every cell out to 8 m is EMPTY on the strength of one
+# frame is a much stronger assertion, and wrong wherever an object is occluded
+# or simply missed. Raise it toward DEPTH_TRUST_MAX_M if coverage matters more
+# than caution.
+FREE_RANGE_M = 10.0
 
 # --- grid / planning ---
 GRID_STEP = 0.25
 NAV_STEP_M = 0.75
-NAV_TIMEOUT_S = 45.0
+# How far short of the target the robot stops. The belief peak usually lands ON
+# an object, and driving to that cell means driving into it -- snapping the
+# goal to a "free" cell does not help, because objects added since the map was
+# built are free on paper and solid in reality. A standoff also keeps the
+# object inside the camera frustum instead of against the lens.
+# Should exceed the robot's footprint radius plus nav2's inflation.
+STANDOFF_M = 0.5
+NAV_TIMEOUT_S = 10.0
 SENSE_PERIOD_S = 1.0
 
-# --- audition ---
-# The TurtleBot4 Pro has NO microphone array, so this robot is VO by
-# construction, not by configuration. There is no DOA topic to subscribe to
-# and no calibration to get wrong. If a mic array is ever fitted, copy the
-# DOA plumbing from voa_BBHumble_node rather than reintroducing a flag here.
-
-# --- sensor noise, already inflated (see SIGMA_INFLATION in fusion_controller) ---
+# --- sensor noise, already inflated ---
 OLF_SIGMA_LOG = 0.75
 SND_SIGMA_DB = 7.5
-MQ3_BASELINE_SAMPLES = 40
 
-# --- source-strength hypotheses, tracked rather than assumed ---
-Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(3, np.log10(5000), 5))
+# Fixed chemical-free MQ3 reading, counts. Replaces sampling clean air at
+# startup: sampling only gives a true baseline if the source is confirmed OFF
+# at that moment, which removes an assumption the run otherwise depends on
+# silently. Re-measure and update this if the sensor, room, or heater
+# warm-up state changes -- it is not re-checked at runtime.
+MQ3_BASELINE = 150.0
+
+# Emission-rate hypotheses, in the plume model's units. THE SPAN IS THE THING
+# THAT MATTERS, not the number of points.
+#
+# c(r) = q_s / (4 pi D r), so the largest hypothesis sets a hard CEILING on how
+# far away the source can possibly be judged to be:
+#       r_max = q_s_max / (4 pi D c)
+# With the old ceiling of 5000 and D=10, a reading of 200 net counts could only
+# be explained by a source at 0.20 m -- no cell farther away had any hypothesis
+# that could produce that reading, so the posterior collapsed to a tight blob
+# right next to the robot regardless of where the source actually was. That is
+# a grid artefact, not evidence.
+#
+# 1e3..1e6 lets 200 counts be explained anywhere from 0.2 m to ~200 m, which
+# comfortably covers a room. Watch the q_s_pegged flag in run_meta: if the
+# posterior still piles onto the top hypothesis, widen further.
+Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(3, 6, 7))
 
 # --- fusion / termination ---
-W_VISION, W_OLFACT = 1.0, 0.5
-W_SOUND = 0.0              # unused: no microphone array
+W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
 ENTROPY_FRAC = 0.7
-MAX_STEPS = 40
+MAX_STEPS = 3
 
-# --- initialization phase: 4 orthogonal egocentric views before search ---
+# --- initialization phase: 5 egocentric views before search ---
 # Mirrors initialize_envKnowledge in the AI2-THOR simulation, which rotates
 # 4x90 degrees and calls the vision branch at each stop before search begins.
 # Doing this on hardware too means the object map starts with a real look
@@ -147,10 +178,30 @@ MAX_STEPS = 40
 # see, and it gives olfaction (and audition, if fitted) an initial reading
 # from every direction rather than just the one the robot happened to be
 # facing at startup.
-INIT_HEADINGS = 4
-INIT_SPIN_RAD = math.pi / 2.0     # 90 degrees, closed-loop via nav2's Spin action
+# 6 headings x 60 deg. With a 69 deg HFOV that overlaps by 9 deg; 4 x 90 deg
+# would leave a 21 deg blind wedge between consecutive views, wide enough to
+# hide an object entirely at range.
+INIT_HEADINGS = 6
+INIT_SPIN_RAD = 2.0 * math.pi / INIT_HEADINGS   # closed-loop via nav2's Spin
 SPIN_TIMEOUT_S = 15.0
+
+# Frames captured at each heading AFTER the base has stopped. Several frames
+# per view costs about a second and removes the single-frame failures that
+# dominate real runs: residual rocking, autofocus still hunting, and YOLO
+# simply missing an object in one frame that it catches in the next.
+PHOTOS_PER_VIEW = 3
+PHOTO_INTERVAL_S = 0.35
+# Settle time before the FIRST frame at a new heading. Separate from SETTLE_S
+# (which exists for the microphone) because the camera needs less: it only has
+# to stop moving, not wait for drivetrain noise to die away.
+CAMERA_SETTLE_S = 0.6
+
+# Whether SEARCH also does a full rotation at each waypoint, not just
+# initialization. Without it the object map only ever sees whichever direction
+# the robot happened to be facing when nav2 finished driving.
+SCAN_DURING_SEARCH = True
 FREE_EVIDENCE = 3.0
+
 
 
 class VAOTurtleBot4(Node):
@@ -162,34 +213,56 @@ class VAOTurtleBot4(Node):
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
         self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
+        self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
         gp = lambda n: self.get_parameter(n).value
 
         self.goal_phrase = f"Is emitting {gp('goal_phrase')} odor:"
         self.sound_phrase = gp('sound_phrase')
         self.entropy_frac = float(gp('entropy_frac'))
-        self.use_V, self.use_O = True, True
-        self.use_A = False               # no microphone array on this platform
-        self.modalities = ''.join(c for c, on in
-                                  (('V', self.use_V), ('A', self.use_A),
-                                   ('O', self.use_O)) if on)
+        # Which senses this run actually processes -- same convention as the
+        # AI2-THOR simulation's ablation strings ('VAO', 'VA', 'VO', ...).
+        # Hardware availability can still veto A even if requested (see the
+        # V and O are software-only toggles.
+        # This robot has NO microphone array, so 'A' is dropped from whatever
+        # is requested rather than being probed for. VO is the only meaningful
+        # mode here; asking for VAO silently runs VO and says so.
+        # Canonical V,A,O order rather than alphabetical, so the string in the
+        # log reads 'VAO'/'VO' as written rather than 'AOV'/'OV'.
+        _req = set(gp('modalities').upper()) & set('VO')
+        requested = ''.join(c for c in 'VAO' if c in _req)
+        if not requested:
+            self.get_logger().warn(
+                f"modalities={gp('modalities')!r} contains none of V/A/O; "
+                f"defaulting to {DEFAULT_MODALITIES}")
+            requested = DEFAULT_MODALITIES
+        self.use_V = 'V' in requested
+        self.use_O = 'O' in requested
+        self.use_A = False              # no microphone array on this platform
 
         # --- config exposed to the helpers via node state ---
         self.cam_hfov_deg, self.cam_vfov_deg = CAM_HFOV_DEG, CAM_VFOV_DEG
         self.cam_height_m = CAM_HEIGHT_M
         self.depth_trust_max_m = DEPTH_TRUST_MAX_M
         self.free_evidence = FREE_EVIDENCE
+        # How far "I looked here and saw nothing" is trusted. Previously fixed
+        # at visionFunction's 2.5 m default, which is why the object map only
+        # ever updated within ~3 m of the robot even with a 10 m depth limit.
+        self.free_range_m = FREE_RANGE_M
         self.nav_step_m = NAV_STEP_M
-        self.olf_sigma_log, self.snd_sigma_db = OLF_SIGMA_LOG, SND_SIGMA_DB
+        self.standoff_m = STANDOFF_M
+        self.olf_sigma_log = OLF_SIGMA_LOG
         self.q_s_hypotheses = Q_S_HYPOTHESES
+        # Wide, because an RMS-derived dB has an arbitrary offset: the grid has
+        # to span wherever the uncalibrated scale happens to land.
+        self.l0_hypotheses = tuple(np.linspace(20.0, 100.0, 5))
+        self.snd_sigma_db = SND_SIGMA_DB
         self.w_vision, self.w_olfact, self.w_sound = W_VISION, W_OLFACT, W_SOUND
-        self.has_sound_level = False     # no array, so no level and no L0 tracker
 
         stamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
         self.save_dir = gp('save_dir') or os.path.join(
             os.getcwd(), f'voa_maps/save/TB4/voa_run_{stamp}')
         os.makedirs(self.save_dir, exist_ok=True)
-        self.get_logger().info(f"modalities={self.modalities}  save_dir={self.save_dir}")
 
         try:
             self.yoloModel = YOLO(gp('yolo_path'))
@@ -198,14 +271,24 @@ class VAOTurtleBot4(Node):
             self.get_logger().error(f"YOLO load failed: {e}")
             raise
 
-        # Derive the class axis from the model unless explicitly overridden.
-        # Done AFTER loading so model.names is available.
         classes = OBJECT_CLASSES or [self.yoloModel.names[i]
                                      for i in sorted(self.yoloModel.names)]
         vf.configure_classes(classes)
         self.get_logger().info(
             f"object-map classes ({len(classes)} from the detector): "
             f"{classes if len(classes) <= 12 else classes[:12] + ['...']}")
+
+        self.requested_modalities = requested
+        self.modalities = ''.join(c for c, on in
+                                  (('V', self.use_V), ('O', self.use_O)) if on)
+        if self.modalities != self.requested_modalities:
+            self.get_logger().warn(
+                f"requested modalities={self.requested_modalities} but running "
+                f"as {self.modalities} (hardware unavailable)")
+        self.save_dir = os.path.join(self.save_dir, self.modalities)
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.get_logger().info(
+            f"modalities={self.modalities}  save_dir={self.save_dir}")
 
         # --- ROS interfaces ---
         self.tf_buffer = Buffer()
@@ -215,16 +298,19 @@ class VAOTurtleBot4(Node):
                                  self.image_callback, qos_profile_sensor_data)
         self.create_subscription(CompressedImage, DEPTH_TOPIC,
                                  self.depth_callback, qos_profile_sensor_data)
-        self.create_subscription(Vector3, OLFACTION_TOPIC, self.olfactory_callback, 10)
+        if self.use_O:
+            self.create_subscription(Vector3, OLFACTION_TOPIC,
+                                     self.olfactory_callback, 10)
         self.create_subscription(LaserScan, SCAN_TOPIC, self.laser_callback,
                                  qos_profile_sensor_data)
         self.create_subscription(Odometry, ODOM_TOPIC, self.odom_callback,
                                  qos_profile_sensor_data)
-        self.create_subscription(OccupancyGrid, MAP_TOPIC, self.map_callback, MAP_QOS)
+        self.create_subscription(OccupancyGrid, MAP_TOPIC,
+                                 self.map_callback, MAP_QOS)
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.spin_client = ActionClient(self, Spin, 'spin')
 
-        # --- sensor state (names match sosl_functions expectations) ---
+        # --- sensor state ---
         self.latest_rgb_image = None
         self.latest_rgb_shape = (0, 0, 0)
         self.latest_rgb_stamp = None
@@ -235,14 +321,18 @@ class VAOTurtleBot4(Node):
         self.robot_map_posY = 0.0
         self.robot_map_angZ = 0.0
         self.robot_map_angW = 1.0
+        self.mq3_counts = 0.0
         self.wind_direction = 0.0
         self.wind_speed = 0.0
-        self.mq3_counts = 0.0
         self.have_olfaction = False
-        self.mq3_baseline = None
-        self._baseline_buf = []
+        self.mq3_baseline = MQ3_BASELINE
         self.lin_vel = 0.0
         self.ang_vel = 0.0
+        # Every pose the robot has occupied, for the trajectory lines drawn on
+        # every saved map. Appended by update_pose, so it captures init-phase
+        # views and mid-drive samples too, not just one point per search step.
+        self.trail = []
+
 
         # --- belief state ---
         self.grid_ready = False
@@ -250,7 +340,7 @@ class VAOTurtleBot4(Node):
         self.gridX = self.gridZ = None
         self.free_mask = None
         self.objectMap = self.soundLog = None
-        self.olfHyp = self.sndHyp = None
+        self.olfHyp = None
         self.sound_sim = None
         self.p_vis = self.p_olf = self.p_snd = self.p_fused = None
         self.H_max = 1.0
@@ -262,6 +352,12 @@ class VAOTurtleBot4(Node):
         # environments group the same way in analysis.
         self.phase = 'Initialization'
         self.init_index = 0
+        self.camera_settle_until = 0.0
+        self.scan_index = 0
+        # Set once a waypoint's rotation is done and cleared after the next
+        # navigation leg, so each search step scans exactly once instead of
+        # re-entering the scan forever.
+        self.scan_done = False
         self.spin_active = False
         self.spin_deadline = 0.0
 
@@ -271,8 +367,11 @@ class VAOTurtleBot4(Node):
         self.t0 = time.time()
         self.nav_active = False
         self.nav_deadline = 0.0
+        self.phase_until = 0.0
+        self.listen_from = 0.0
         self.last_sense = 0.0
         self._pending = {}
+
 
         self.create_timer(0.1, self.control_callback)
 
@@ -304,7 +403,15 @@ class VAOTurtleBot4(Node):
         self.map_msg = msg
 
     def olfactory_callback(self, msg):
-        # x = wind direction, y = wind speed, z = chemical concentration
+        """/olfaction is a Vector3: x = wind direction, y = wind speed,
+        z = raw chemical counts.
+
+        The wind fields are read but NOT used: rosFunctions runs the plume at
+        U=0, matching the AI2-THOR experiments and the still-air assumption, so
+        sim and hardware stay comparable. They are logged so the assumption can
+        be checked after the fact -- if wind_speed is consistently non-zero the
+        still-air model is wrong for this room.
+        """
         self.wind_direction = float(msg.x)
         self.wind_speed = float(msg.y)
         self.mq3_counts = float(msg.z)
@@ -314,10 +421,10 @@ class VAOTurtleBot4(Node):
     def update_pose(self, stamp=None):
         """Refresh robot_map_* from TF. Returns True when a pose is available.
 
-        With a stamp, the transform is looked up AT THAT TIME. A camera frame
-        processed while nav2 is still driving was captured at a pose the robot
-        has already left; using the latest transform instead projects every
-        detection into the wrong cell.
+        With a stamp the transform is looked up AT THAT TIME: a camera frame
+        processed while nav2 is driving was captured at a pose the robot has
+        already left, and using the latest transform projects every detection
+        into the wrong cell.
         """
         try:
             when = rclpy.time.Time() if stamp is None else rclpy.time.Time.from_msg(stamp)
@@ -335,6 +442,13 @@ class VAOTurtleBot4(Node):
         self.robot_map_posY = float(tr.y)
         self.robot_map_angZ = float(r.z)
         self.robot_map_angW = float(r.w)
+        # Only record a new trail point once the robot has actually moved, so
+        # standing still through a 3 s listening window does not add hundreds
+        # of duplicate points to every plotted line.
+        if (not self.trail
+                or math.hypot(self.robot_map_posX - self.trail[-1][0],
+                              self.robot_map_posY - self.trail[-1][1]) > 0.02):
+            self.trail.append((self.robot_map_posX, self.robot_map_posY))
         return True
 
     def halt(self):
@@ -416,10 +530,12 @@ class VAOTurtleBot4(Node):
             return
 
         if self.state == 'WAIT_SENSORS':
-            # Block until RGB and depth have BOTH arrived. Without this the
-            # first steps run with visionBranch returning nothing, the object
-            # map stays at its prior, and the run looks like vision is broken
-            # when it is really just not connected yet.
+            if not self.use_V:
+                # Vision is off for this run -- nothing to wait for. All three
+                # requested modes (VAO/VA/VO) include V, so this only matters
+                # if you ever run 'AO' or 'A' or 'O' alone.
+                self.state = 'INIT_BEGIN'
+                return
             missing = []
             if self.latest_rgb_image is None:
                 missing.append(RGB_TOPIC)
@@ -432,23 +548,9 @@ class VAOTurtleBot4(Node):
                 return
             self.get_logger().info(
                 f"camera OK -- RGB {self.latest_rgb_shape[1]}x{self.latest_rgb_shape[0]}, "
-                f"depth {self.latest_depth_image.shape[1]}x{self.latest_depth_image.shape[0]} "
-                f"({self.latest_depth_image.dtype})")
-            self.state = 'BASELINE' if self.use_O else 'INIT_BEGIN'
-            return
-
-        if self.state == 'BASELINE':
-            if not self.have_olfaction:
-                self.get_logger().info(f"waiting for {OLFACTION_TOPIC}...",
-                                       throttle_duration_sec=5.0)
-                return
-            self._baseline_buf.append(self.mq3_counts)
-            if len(self._baseline_buf) >= MQ3_BASELINE_SAMPLES:
-                self.mq3_baseline = float(np.median(self._baseline_buf))
-                self.get_logger().info(
-                    f"MQ3 clean-air baseline {self.mq3_baseline:.1f} counts "
-                    f"from {len(self._baseline_buf)} samples")
-                self.state = 'INIT_BEGIN'
+                f"depth {self.latest_depth_image.shape[1]}x"
+                f"{self.latest_depth_image.shape[0]} ({self.latest_depth_image.dtype})")
+            self.state = 'INIT_BEGIN'
             return
 
         if self.state == 'INIT_BEGIN':
@@ -460,24 +562,32 @@ class VAOTurtleBot4(Node):
             return
 
         if self.state == 'INIT_SENSE':
+            # Hold still and let the camera settle BEFORE capturing. Frames
+            # grabbed while the base is still rocking after a spin are the
+            # motion-blurred ones.
+            self.halt()
+            if self.camera_settle_until == 0.0:
+                self.camera_settle_until = now + CAMERA_SETTLE_S
+                return
+            if now < self.camera_settle_until:
+                return
+            self.camera_settle_until = 0.0
+
             if not self.update_pose(self.latest_rgb_stamp):
                 return
             dets, n_rej = [], 0
             if self.use_V:
-                annotated, dets, n_rej = rf.visionBranch(self.yoloModel, self)
-                self.n_depth_rejected += n_rej
-                if annotated is not None:
-                    cv.imwrite(os.path.join(
-                        self.save_dir, f"init_{self.init_index:02d}.jpg"), annotated)
+                dets, n_rej = self.capture_views(f"init_{self.init_index:02d}")
             counts = rf.olfactionBranch(self) if self.use_O else None
             self.get_logger().info(
                 f"--- init view {self.init_index + 1}/{INIT_HEADINGS} @ "
                 f"({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f}) ---")
             self.report_sensing(dets, n_rej, counts)
-            self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts, n_doa=0,
+            self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts,
                                  dets=dets, rx=self.robot_map_posX, ry=self.robot_map_posY)
-            self.log_init_view(self._pending)
 
+
+            self.log_init_view(self._pending)
             self.state = 'INIT_NEXT'
             return
 
@@ -511,24 +621,79 @@ class VAOTurtleBot4(Node):
             self.state = 'INIT_SENSE'
             return
 
+        if self.state == 'SEARCH_SCAN_SENSE':
+            self.halt()
+            if self.camera_settle_until == 0.0:
+                self.camera_settle_until = now + CAMERA_SETTLE_S
+                return
+            if now < self.camera_settle_until:
+                return
+            self.camera_settle_until = 0.0
+            if not self.update_pose(self.latest_rgb_stamp):
+                return
+            self.capture_views(f"scan_{self.step:03d}_{self.scan_index:02d}")
+            self.get_logger().info(
+                f"  scan view {self.scan_index + 1}/{INIT_HEADINGS} "
+                f"@ ({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f})")
+            self.state = 'SEARCH_SCAN_NEXT'
+            return
+
+        if self.state == 'SEARCH_SCAN_NEXT':
+            self.scan_index += 1
+            if self.scan_index >= INIT_HEADINGS:
+                # Rotation done -- fall through to the normal sensing step,
+                # which will not re-enter the scan because scan_done is set.
+                self.state = 'SENSE'
+                return
+            if self.send_spin(INIT_SPIN_RAD):
+                self.state = 'SEARCH_SCAN_ROTATE'
+            else:
+                self.get_logger().warn(
+                    "cannot rotate mid-search; continuing at the current heading")
+                self.state = 'SENSE'
+            return
+
+        if self.state == 'SEARCH_SCAN_ROTATE':
+            if self.spin_active and now < self.spin_deadline:
+                return
+            if self.spin_active:
+                self.get_logger().warn("scan spin timed out; continuing anyway")
+                self.spin_active = False
+            self.state = 'SEARCH_SCAN_SENSE'
+            return
+
         if self.state == 'SENSE':
+            # A full rotation at this waypoint before sensing, so the object
+            # map gets all round rather than only the heading nav2 left the
+            # robot facing. Reuses the initialization scan states; scan_index
+            # is reset here and SCAN_RETURN sends control back to SENSE_DO.
+            if SCAN_DURING_SEARCH and self.use_V and not self.scan_done:
+                self.scan_index = 0
+                self.scan_done = True
+                self.state = 'SEARCH_SCAN_SENSE'
+                return
+
+            self.halt()
+            if self.camera_settle_until == 0.0:
+                self.camera_settle_until = now + CAMERA_SETTLE_S
+                return
+            if now < self.camera_settle_until:
+                return
+            self.camera_settle_until = 0.0
+
             if not self.update_pose(self.latest_rgb_stamp):
                 return
             dets, n_rej = [], 0
             if self.use_V:
-                annotated, dets, n_rej = rf.visionBranch(self.yoloModel, self)
-                self.n_depth_rejected += n_rej
-                if annotated is not None:
-                    cv.imwrite(os.path.join(self.save_dir,
-                                            f"yolo_{self.step:03d}.jpg"), annotated)
+                dets, n_rej = self.capture_views(f"yolo_{self.step:03d}")
             counts = rf.olfactionBranch(self) if self.use_O else None
             self.report_sensing(dets, n_rej, counts)
             self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts,
-                                 n_doa=0, dets=dets,
+                                 dets=dets,
                                  rx=self.robot_map_posX, ry=self.robot_map_posY)
+
             self.state = 'FUSE'
             return
-
 
         if self.state == 'FUSE':
             trig = rf.update_belief(self)
@@ -536,7 +701,7 @@ class VAOTurtleBot4(Node):
             self.log_step(p, trig)
             self.get_logger().info(
                 f"step {self.step}  det={p['n_det']} (rej {p['n_rej']}) "
-                f"doa={p['n_doa']} mq3={p['counts']}  "
+                f"mq3={p['counts']}  "
                 f"trigger {trig:.3f} (stop at <= {self.entropy_frac})")
             if self.olfHyp is not None and self.olfHyp.at_endpoint():
                 self.get_logger().warn(
@@ -550,8 +715,14 @@ class VAOTurtleBot4(Node):
                     f"{why}; peak is {rf.peak_object_name(self)} at "
                     f"({tx:.2f}, {tz:.2f}); driving there and terminating")
                 self.phase = 'goal_navigation'
-                self.send_nav_goal(tx, tz,
-                                   math.atan2(tz - p['ry'], tx - p['rx']))
+                # Approach to STANDOFF_M and face it, rather than driving onto
+                # the cell. Uncapped: this is the final leg, so there is no
+                # reason to stop part-way.
+                gx, gy, gyaw = rf.standoff_goal(self, tx, tz)
+                self.get_logger().info(
+                    f"  approaching to within {self.standoff_m:.2f} m -> "
+                    f"({gx:.2f}, {gy:.2f})")
+                self.send_nav_goal(gx, gy, gyaw)
                 self.state = 'FINISH'
                 return
 
@@ -577,6 +748,7 @@ class VAOTurtleBot4(Node):
                 self.nav_active = False
             self.halt()
             self.step += 1
+            self.scan_done = False      # allow one scan at the new waypoint
             self.state = 'SENSE'
             return
 
@@ -586,18 +758,90 @@ class VAOTurtleBot4(Node):
             self.halt()
             self.save_data()
             self.state = 'DONE'
-            return
+            self.get_logger().info("run complete; shutting down")
+            # Actually exit rather than sitting in DONE forever. rclpy.spin()
+            # blocks indefinitely, and a state machine that has stopped
+            # changing state gives it no reason to return -- so raise, and let
+            # main() catch it. SystemExit is the conventional way to break out
+            # of a spin from inside a callback: it unwinds through spin()
+            # rather than being swallowed by the executor's error handling.
+            raise SystemExit
+
+    # ---------------------------------------------------------------- capture
+    def capture_views(self, tag):
+        """Run vision over several DISTINCT frames at the current heading.
+
+        Each accepted frame is folded into the object map separately, so N
+        frames deposit N units of Dirichlet evidence at a detected cell. That
+        is the point: a detection YOLO finds in 2 of 3 frames accumulates real
+        weight, while a single-frame false positive is outvoted rather than
+        being treated as established fact.
+
+        FRAME FRESHNESS IS ENFORCED. The camera callback runs on its own
+        thread, so simply calling visionBranch three times in a row can process
+        the SAME buffered image three times -- which would triple-count one
+        observation and manufacture confidence out of nothing. Each iteration
+        waits for the RGB timestamp to change, and a frame that never arrives
+        is skipped rather than counted again.
+
+        Only the last annotated frame is written to disk; writing all of them
+        multiplies the image count for little extra information.
+
+        Assumes the base is already stopped. The scan states halt and settle
+        first -- capturing mid-drive is what produced the blurred frames.
+        """
+        all_dets, total_rej, annotated = [], 0, None
+        n_used, n_stale = 0, 0
+        last_stamp = None
+
+        for i in range(max(1, PHOTOS_PER_VIEW)):
+            if i > 0:
+                # Wait for genuinely new pixels, not just a fixed delay.
+                deadline = time.time() + PHOTO_INTERVAL_S + 0.5
+                while time.time() < deadline:
+                    if self._rgb_stamp_key() != last_stamp:
+                        break
+                    time.sleep(0.02)
+                else:
+                    # Timed out with no new frame. Counting the old one again
+                    # would be inventing evidence, so skip this slot.
+                    n_stale += 1
+                    continue
+                self.update_pose(self.latest_rgb_stamp)
+
+            last_stamp = self._rgb_stamp_key()
+            ann, dets, n_rej = rf.visionBranch(self.yoloModel, self)
+            total_rej += n_rej
+            all_dets.extend(dets)
+            n_used += 1
+            if ann is not None:
+                annotated = ann
+
+        self.n_depth_rejected += total_rej
+        if annotated is not None:
+            cv.imwrite(os.path.join(self.save_dir, f"{tag}.jpg"), annotated)
+        if n_stale:
+            self.get_logger().warn(
+                f"{tag}: only {n_used}/{PHOTOS_PER_VIEW} frames were new "
+                f"({n_stale} stale, skipped rather than double-counted) -- "
+                f"the camera may be publishing slower than PHOTO_INTERVAL_S")
+        return all_dets, total_rej
+
+    def _rgb_stamp_key(self):
+        """Hashable identity of the current RGB frame, for freshness checks."""
+        st = self.latest_rgb_stamp
+        if st is None:
+            return None
+        return (getattr(st, 'sec', None), getattr(st, 'nanosec', None))
 
     # ---------------------------------------------------------------- reporting
     def report_sensing(self, dets, n_rej, counts):
         """Print what the sensors actually returned this step.
 
-        The similarity column is the one to watch: a detection with a high
-        confidence but a near-zero sim contributes almost nothing to the visual
+        The similarity column is the one to watch: a detection with high
+        confidence but near-zero sim contributes almost nothing to the visual
         belief, because the semantic map is the class posterior projected onto
-        exactly these numbers. A run where every sim is ~0 means the goal
-        phrase and the class names are not meeting, and vision is effectively
-        just marking free space.
+        exactly these numbers.
         """
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
         self.get_logger().info(
@@ -612,9 +856,7 @@ class VAOTurtleBot4(Node):
             else:
                 self.get_logger().info(
                     f"  olfaction  raw {self.mq3_counts:.1f} - "
-                    f"baseline {self.mq3_baseline:.1f} = {counts:.1f} counts   "
-                    f"wind {self.wind_speed:.2f} m/s @ "
-                    f"{self.wind_direction:.0f} deg")
+                    f"baseline {self.mq3_baseline:.1f} = {counts:.1f} counts")
 
         if not self.use_V:
             return
@@ -645,8 +887,23 @@ class VAOTurtleBot4(Node):
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
-            n_doa_samples=p['n_doa'], chemicalConc=p['counts'],
+            yolo_raw=(getattr(self, 'last_vision_counts', {}) or {}).get('raw'),
+            det_no_depth=(getattr(self, 'last_vision_counts', {}) or {}).get('no_depth'),
+            det_off_class=(getattr(self, 'last_vision_counts', {}) or {}).get('unknown_class'),
+            chemicalConc=p['counts'],
         ))
+        # The object map is already accumulating during initialization, so it
+        # is worth rendering. The BELIEF maps are not -- update_belief has not
+        # run yet, so every branch is still its uniform prior and the panels
+        # would just be blank squares.
+        # Full diagnostic set for this init view. The BELIEF panels are
+        # included even though update_belief has not run yet -- during
+        # initialization they show the priors, which is the correct baseline to
+        # compare the first search step against.
+        rf.save_object_map(self, self.init_index, prefix='init_objects')
+        rf.save_modality_diagnostics(self, self.init_index, prefix='init_diag')
+        rf.save_vision_class_maps(self, self.init_index,
+                                  prefix='init_vision_classes')
 
     def log_step(self, p, trig):
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
@@ -655,34 +912,36 @@ class VAOTurtleBot4(Node):
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
             n_detections=p['n_det'], n_depth_rejected=p['n_rej'],
+            yolo_raw=(getattr(self, 'last_vision_counts', {}) or {}).get('raw'),
+            det_no_depth=(getattr(self, 'last_vision_counts', {}) or {}).get('no_depth'),
+            det_off_class=(getattr(self, 'last_vision_counts', {}) or {}).get('unknown_class'),
             best_detection=(max(p.get('dets') or [], key=lambda d: d['sim'],
                                 default={}).get('class_name')),
             best_sim=(max((d['sim'] for d in (p.get('dets') or [])),
                           default=float('nan'))),
-            n_doa_samples=p['n_doa'],
             chemicalConc=p['counts'],
-            wind_direction=self.wind_direction,
-            wind_speed=self.wind_speed,
             H_fused=round(rf.map_entropy(self.p_fused), 3),
             trigger=round(trig, 4),
             peak_object=rf.peak_object_name(self),
-            # Guard on the tracker, not the modality flag: audition can be
-            # enabled while the device or topic is absent.
             q_s_map=float(np.exp(self.olfHyp.map_value())) if self.olfHyp else None,
-            L0_map=float(self.sndHyp.map_value()) if self.sndHyp else None,
         ))
+        # Only the arrays this run's modalities actually produced. A uniform
+        # placeholder for a disabled branch wastes space and, worse, reads
+        # later as "this modality ran and learned nothing" rather than "this
+        # modality was switched off".
         np.savez_compressed(
             os.path.join(self.save_dir, f"maps_{self.step:03d}.npz"),
-            fused=self.p_fused, vision=self.p_vis, olfaction=self.p_olf,
-            sound=self.p_snd, free=self.free_mask,
-            x_points=self.x_points, z_points=self.z_points)
+            **rf.belief_arrays_for_saving(self))
+        rf.save_all_diagnostics(self, self.step)
 
     def save_data(self):
         pd.DataFrame(self.rows).to_csv(
             os.path.join(self.save_dir, 'trajectory_log.csv'), index=False)
         tx, tz = rf.fused_peak(self)
         meta = dict(platform='turtlebot4_pro', ros_distro='jazzy',
-                    modalities=self.modalities, steps=self.step + 1,
+                    modalities=self.modalities,
+                    requested_modalities=self.requested_modalities,
+                    steps=self.step + 1,
                     entropy_frac=self.entropy_frac,
                     estimated_source=dict(x=tx, y=tz),
                     peak_object=rf.peak_object_name(self),
@@ -694,13 +953,11 @@ class VAOTurtleBot4(Node):
             meta['q_s_map'] = float(np.exp(self.olfHyp.map_value()))
             meta['q_s_posterior'] = [float(v) for v in self.olfHyp.hypothesis_posterior()]
             meta['q_s_pegged'] = self.olfHyp.at_endpoint()
-        if self.sndHyp is not None:
-            meta['L0_map'] = float(self.sndHyp.map_value())
-            meta['L0_pegged'] = self.sndHyp.at_endpoint()
         with open(os.path.join(self.save_dir, 'run_meta.json'), 'w') as f:
             json.dump(meta, f, indent=2)
         self.get_logger().info(
             f"estimated source at map ({tx:.2f}, {tz:.2f}) -> {self.save_dir}")
+
 
 
 def main(args=None):
@@ -708,13 +965,24 @@ def main(args=None):
     node = VAOTurtleBot4()
     try:
         rclpy.spin(node)
+    except SystemExit:
+        # Normal end of run -- FINISH has already halted the base and written
+        # every output, so there is nothing left to do here.
+        node.get_logger().info("exiting cleanly")
     except KeyboardInterrupt:
+        # Ctrl-C partway through: stop the robot and salvage whatever the run
+        # produced rather than losing all of it.
         node.halt()
-        if node.grid_ready:
+        if node.grid_ready and node.state != 'DONE':
             node.save_data()
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # shutdown() raises if the context is already torn down, which happens
+        # on some rclpy versions when SystemExit propagates through spin().
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

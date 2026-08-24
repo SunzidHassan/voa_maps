@@ -584,26 +584,77 @@ def peak_object_name(node):
         return "?"
 
 
-def pick_goal(node):
-    """Next nav2 goal: toward the fused peak, capped and snapped to free space.
+def standoff_goal(node, tx, tz, standoff=None, cap=None):
+    """A nav2 goal that APPROACHES (tx, tz) without driving onto it.
 
-    Capping keeps each step short enough that the belief is refreshed on the
-    way; snapping keeps nav2 from ever being handed a goal inside an obstacle.
+    Returns (gx, gy, yaw) where the yaw always faces the target, so the camera
+    ends up pointed at the thing the robot came to look at even though the base
+    stops short of it.
+
+    WHY A STANDOFF IS NEEDED AT ALL
+    -------------------------------
+    Snapping the goal to a free cell is not sufficient protection. "Free" means
+    free in the SLAM map, and the object the belief has settled on very often
+    is NOT in that map -- a microwave on a counter, a bin pushed against a wall
+    after mapping, anything added since. So the peak cell can be perfectly free
+    on paper and physically occupied. Stopping a fixed distance short is what
+    makes that safe, and it also keeps the object inside the camera frustum
+    rather than pressed against the lens.
+
+    Selection, in order:
+      * if the robot is already within `standoff` of the target, do not move --
+        just return the current pose with the yaw turned to face it;
+      * otherwise aim for the point on the robot->target line that sits
+        `standoff` short of the target, then snap to the nearest FREE cell
+        that is still at least ~80% of `standoff` away from the target, so
+        snapping can never undo the clearance it was meant to provide;
+      * `cap` optionally limits how far this single leg travels, which is how
+        the search phase keeps refreshing its belief on the way.
     """
-    tx, tz = fused_peak(node)
+    standoff = node.standoff_m if standoff is None else standoff
     rx, ry = node.robot_map_posX, node.robot_map_posY
     d = math.hypot(tx - rx, tz - ry)
-    heading = math.atan2(tz - ry, tx - rx)
-    if d <= node.nav_step_m or d < 1e-6:
-        return tx, tz, heading
+    heading = math.atan2(tz - ry, tx - rx)      # always look AT the target
 
-    f = node.nav_step_m / d
+    if d <= standoff or d < 1e-6:
+        # Close enough already. Moving would only reduce clearance.
+        return rx, ry, heading
+
+    reach = d - standoff
+    if cap is not None:
+        reach = min(reach, cap)
+    f = reach / d
     gx, gy = rx + (tx - rx) * f, ry + (tz - ry) * f
+
     free_idx = np.where(node.free_mask.ravel())[0]
+    if free_idx.size == 0:
+        return gx, gy, heading
     fx = node.gridX.ravel()[free_idx]
     fy = node.gridZ.ravel()[free_idx]
+
+    # Only cells that preserve the clearance. 0.8 rather than 1.0 because the
+    # belief grid is coarse (0.25 m) and an exact-standoff ring may contain no
+    # cell at all; 20% slack keeps a candidate available without collapsing
+    # the margin.
+    keep = np.hypot(fx - tx, fy - tz) >= 0.8 * standoff
+    if not keep.any():
+        # Every free cell is inside the standoff ring -- a small enclosed
+        # space. Stay put rather than drive in.
+        return rx, ry, heading
+    fx, fy = fx[keep], fy[keep]
     j = int(np.argmin((fx - gx) ** 2 + (fy - gy) ** 2))
     return float(fx[j]), float(fy[j]), heading
+
+
+def pick_goal(node):
+    """Next SEARCH goal: toward the fused peak, capped, and kept off the object.
+
+    The cap keeps each leg short enough that the belief is refreshed on the
+    way; the standoff stops the robot driving onto whatever the belief has
+    settled on when the peak happens to be within one step.
+    """
+    tx, tz = fused_peak(node)
+    return standoff_goal(node, tx, tz, cap=node.nav_step_m)
 
 
 # ============================================================= RENDERING
