@@ -78,8 +78,7 @@ from . import rosFunctions as rf
 # the Robuddy node and so an ablation can still run vision-only.
 DEFAULT_MODALITIES = 'VO'
 
-OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
-                  'oven', 'sink', 'refrigerator', 'clock']
+OBJECT_CLASSES =  ['Cardboard box', 'First aid box', 'Humidifier']
 
 # --- topics / frames ---
 RGB_TOPIC = '/oakd/rgb/image_raw/compressed'
@@ -211,7 +210,8 @@ class VAOTurtleBot4(Node):
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
-        self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
+        # self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
+        self.declare_parameter('yolo_path', 'voa_maps/models/YOLO/yolo26x_FTneth232.pt')
         self.declare_parameter('save_dir', '')
         self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)

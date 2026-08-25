@@ -1,0 +1,28 @@
+{
+  "platform": "turtlebot4_pro",
+  "ros_distro": "jazzy",
+  "modalities": "VO",
+  "requested_modalities": "VO",
+  "steps": 4,
+  "entropy_frac": 0.7,
+  "estimated_source": {
+    "x": -0.5,
+    "y": 0.75
+  },
+  "peak_object": "empty floor",
+  "mq3_baseline": 150.0,
+  "depth_rejected": 0,
+  "goal_phrase": "Is emitting humidity odor:",
+  "final_phase": "goal_navigation",
+  "q_s_map": 100000.00000000001,
+  "q_s_posterior": [
+    3.508252111442954e-74,
+    2.198567423237781e-34,
+    1.7570699122568583e-11,
+    0.015045552104707776,
+    0.9828726972836829,
+    0.0020817505940385773,
+    1.4754440155687348e-24
+  ],
+  "q_s_pegged": false
+}

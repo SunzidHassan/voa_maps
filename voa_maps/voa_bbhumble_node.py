@@ -335,7 +335,7 @@ class VAORobuddy(Node):
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
-        self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
+        self.declare_parameter('yolo_path', 'voa_maps/models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
         self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
