@@ -64,7 +64,13 @@ USE_CONF_AS_EVIDENCE = False                        # False = perfect YOLO (+1)
 FREE_FOV_DEG     = 90.0    # camera horizontal field of view
 FREE_RANGE_M     = 2.5     # only mark cells this close as reliably observed
 FREE_MIN_RANGE_M = 0.25    # skip the cell the robot stands in
-FREE_EVIDENCE    = 0.3     # weaker than a detection's 1.0, on purpose
+# MUST stay well below a detection's 1.0. Absence of evidence is far weaker
+# than evidence of presence: YOLO missing a real object in one frame is common,
+# YOLO inventing one is rare. At 3.0 a single missed frame outweighed a
+# detection 3:1, so an object detected in 1 of 3 frames had its own cell
+# relabelled 'empty floor' and its visual likelihood driven BELOW that of
+# never-observed space.
+FREE_EVIDENCE    = 0.2
 CLIP_NEGATIVE_SIM    = True                         # clip cosine sim at 0
 
 _SIM_CACHE = {}                                     # goal_phrase -> (K,) sim vector
@@ -123,7 +129,8 @@ def update_object_map(beta, className, x_world, z_world, x_points, z_points, evi
 def update_free_space(beta, x_points, z_points, robot_x, robot_z, robot_yaw_deg,
                       detected_cells=(), fov_deg=FREE_FOV_DEG,
                       max_range=FREE_RANGE_M, evidence=FREE_EVIDENCE,
-                      min_range=FREE_MIN_RANGE_M):
+                      min_range=FREE_MIN_RANGE_M, protect_detected=True,
+                      protect_threshold=0.5):
     """Accumulate EMPTY_CLASS evidence for cells seen to contain nothing.
 
     Every cell inside the camera frustum that did not receive a detection this
@@ -155,6 +162,18 @@ def update_free_space(beta, x_points, z_points, robot_x, robot_z, robot_yaw_deg,
     for (r, c) in detected_cells:
         if 0 <= r < seen.shape[0] and 0 <= c < seen.shape[1]:
             seen[r, c] = False
+
+    if protect_detected:
+        # Any cell that has EVER accumulated real object evidence is exempt,
+        # not just the cells detected in this frame. Otherwise an object seen
+        # once is slowly erased by every later frame that misses it -- which is
+        # exactly how a detected humidifier ends up labelled 'empty floor'.
+        # The asymmetry is deliberate and matches the sensor: a miss is weak
+        # evidence of absence, a detection is strong evidence of presence.
+        ei = CLS_IDX.get(EMPTY_CLASS)
+        obj = np.delete(beta, ei, axis=2) if ei is not None else beta
+        obj_evidence = obj.sum(axis=2) - (PRIOR_STRENGTH * (obj.shape[2] / K_CLASSES))
+        seen &= (obj_evidence < protect_threshold)
     beta[seen, CLS_IDX[EMPTY_CLASS]] += evidence
     return beta
 

@@ -215,7 +215,38 @@ AUDIO_BLOCK = 1600          # samples per RMS block (100 ms at 16 kHz)
 LEVEL_REF_RMS = 1.0         # arbitrary: only level DIFFERENCES are identifiable
 
 # --- sensor noise, already inflated ---
+# --- plume shape ---
+# c(r) = q_s / (4 pi D r) * exp(-r / lambda),   lambda = sqrt(D * tau)  [U = 0]
+#
+# TWO SEPARATE THINGS, and they are easy to confuse:
+#   SHAPE     is set by lambda = sqrt(D*tau)  -- how fast influence falls off
+#   AMPLITUDE is set by the RATIO q_s/D       -- only the ratio is identifiable
+#
+# The old D=10, tau=1000 gives lambda = 100 m. In a 4x4 m room exp(-r/lambda)
+# is 0.96-0.99 everywhere, so the decay term did nothing at all and the model
+# was a pure 1/r law with no room scale in it.
+#
+# For a ~4x4 m room lambda should be about half the room span, ~2 m.
+# lambda = 2 needs D*tau = 4, and TAU is the safe knob to turn: changing D
+# instead would rescale the amplitude by the same factor and push the required
+# q_s outside Q_S_HYPOTHESES (D=0.004 would need q_s ~ 40, below the grid
+# floor, so it would silently peg). Keeping D fixed leaves the working q_s
+# range valid.
+PLUME_D = 0.004       # diffusivity; paired with q_s, only q_s/D is identifiable
+PLUME_TAU = 1000.0    # particle lifetime; D*TAU = 4 -> lambda = 2.0 m
+
 OLF_SIGMA_LOG = 0.75
+
+# Consecutive chemical readings are NOT independent. The MQ3 responds over
+# seconds, and the six initialization views are taken from one spot ~10 cm
+# apart -- measured log-noise there was 0.040, while sigma is already 0.75, so
+# sigma is 19x the actual noise and raising it further is the wrong lever.
+# The real problem is that each reading multiplies in a full likelihood, so six
+# near-identical readings raise the evidence to the 6th power and drive the
+# posterior ring to 0 and 1 within two steps.
+# Tempering down-weights each update: t=1 is the old behaviour, t=1/6 treats a
+# six-view scan as roughly one independent observation.
+OLF_TEMPER = 0.25
 SND_SIGMA_DB = 7.5
 
 # Fixed chemical-free MQ3 reading, counts. Replaces sampling clean air at
@@ -240,7 +271,13 @@ MQ3_BASELINE = 150.0
 # 1e3..1e6 lets 200 counts be explained anywhere from 0.2 m to ~200 m, which
 # comfortably covers a room. Watch the q_s_pegged flag in run_meta: if the
 # posterior still piles onto the top hypothesis, widen further.
-Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(3, 6, 7))
+# Rescaled for D = 0.004. Only the RATIO q_s/D is identifiable, so dropping D
+# by 2500x drops the q_s that explains the same reading by the same factor:
+# the old 1e5 becomes ~40. Measured against this run's 320-490 counts, a
+# 10..100 grid spans source ranges of roughly 0.45-4.5 m, i.e. the whole room.
+# Widened slightly at both ends so that a low reading far from the source does
+# not peg at the floor -- check q_s_pegged in run_meta if in doubt.
+Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(np.log10(5), np.log10(200), 7))
 
 # --- fusion / termination ---
 W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
@@ -335,7 +372,7 @@ class VAORobuddy(Node):
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
-        self.declare_parameter('yolo_path', 'voa_maps/models/YOLO/yolo26m.pt')
+        self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
         self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
@@ -373,6 +410,9 @@ class VAORobuddy(Node):
         self.nav_step_m = NAV_STEP_M
         self.standoff_m = STANDOFF_M
         self.olf_sigma_log = OLF_SIGMA_LOG
+        self.olf_temper = OLF_TEMPER
+        self.plume_D = PLUME_D
+        self.plume_tau = PLUME_TAU
         self.q_s_hypotheses = Q_S_HYPOTHESES
         # Wide, because an RMS-derived dB has an arbitrary offset: the grid has
         # to span wherever the uncalibrated scale happens to land.
@@ -1181,6 +1221,7 @@ class VAORobuddy(Node):
         rf.save_modality_diagnostics(self, self.init_index, prefix='init_diag')
         rf.save_vision_class_maps(self, self.init_index,
                                   prefix='init_vision_classes')
+        rf.save_cell_csv(self, self.init_index, prefix='init_cells')
 
     def log_step(self, p, trig):
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)

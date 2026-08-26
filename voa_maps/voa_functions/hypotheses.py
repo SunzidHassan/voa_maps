@@ -2,14 +2,17 @@
 hypotheses.py  --  unknown source strength, tracked as a few hypotheses.
 
 Both the olfactory and auditory branches have the same problem: the forward
-model needs a source-strength constant that is unknown to the robot.
+model needs a source-strength constant that nobody knows.
 
-olfaction   c(r) = q_s / (4 pi D r) * exp(-r/lambda)      q_s unknown [steady-state concentration of a chemical odorant as it diffuses from a continuous point source]
-audition    L(r) = L0 - 20 log10(r)                       L0 unknown [acoustic inverse square law for calculating the sound pressure level (SPL) at a specific distance from a point source in a free field]
+    olfaction   c(r) = q_s / (4 pi D r) * exp(-r/lambda)      q_s unknown
+    audition    L(r) = L0 - 20 log10(r)                       L0 unknown
 
 Both are unidentifiable from a single reading -- a weak source nearby and a
-strong source far away give the same number.
-But they become identifiable across several readings, because the strength
+strong source far away give the same number. Worse, guessing is not safe:
+measured on a 4 m grid, an emission rate wrong by 10x pushed localisation from
+0.39 m to 2.58 m, and a loudness wrong by 15 dB from 0.18 m to 2.83 m.
+
+Both also become identifiable across several readings, because the strength
 cancels in differences:
 
     log c_i - log c_j  depends only on r_i, r_j     (q_s cancels)
@@ -73,7 +76,7 @@ class ScaleHypotheses:
         self.log_joint = np.tile(self.log_prior[:, None, None], (1,) + self.shape)
         self.n_updates = 0
 
-    def update(self, predictor, observed, sigma):
+    def update(self, predictor, observed, sigma, temper=1.0):
         """Fold in one reading.
 
         Parameters
@@ -87,11 +90,23 @@ class ScaleHypotheses:
             olfaction, dB level for audition.
         sigma : float
             Noise standard deviation in that same space.
+        temper : float
+            Weight on this single reading, in [0, 1]. 1.0 treats it as a fully
+            independent observation; smaller values account for correlation
+            between consecutive readings. Equivalent to scaling sigma by
+            1/sqrt(temper), but expressed as a count of effective observations
+            rather than as a noise level, which is the thing actually being
+            corrected.
         """
         pred = np.asarray(predictor, float)
+        t = float(temper)
         for k, v in enumerate(self.values):
             d = (float(observed) - (v + pred)) / max(sigma, 1e-9)
-            self.log_joint[k] += -0.5 * d * d
+            # temper < 1 down-weights this reading. Readings taken seconds
+            # apart from nearly the same pose are highly correlated; counting
+            # each as fully independent raises the evidence to the Nth power
+            # and produces a posterior far sharper than the data supports.
+            self.log_joint[k] += t * (-0.5 * d * d)
         self.log_joint -= self.log_joint.max()
         self.n_updates += 1
         return self

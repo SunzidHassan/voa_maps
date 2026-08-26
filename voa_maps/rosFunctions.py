@@ -363,6 +363,7 @@ def olfactionBranch(node):
     # U=wind_speed, psi_deg=(90 - wind_direction) % 360 here.
     predictor = hy.olfactory_predictor(
         node.gridX, node.gridZ, node.robot_map_posX, node.robot_map_posY,
+        D=getattr(node, 'plume_D', 10.0), tau=getattr(node, 'plume_tau', 1000.0),
         U=0.0, psi_deg=0.0)
     obs = float(np.log(counts))
 
@@ -382,7 +383,10 @@ def olfactionBranch(node):
     except Exception:
         node.olf_loglik_step = None
 
-    node.olfHyp.update(predictor, obs, node.olf_sigma_log)
+    # Tempered: consecutive readings are correlated, so counting each as a
+    # full independent observation manufactures confidence. See OLF_TEMPER.
+    node.olfHyp.update(predictor, obs, node.olf_sigma_log,
+                       temper=getattr(node, 'olf_temper', 1.0))
     return counts
 
 
@@ -822,7 +826,11 @@ def save_object_map(node, step, prefix='objects'):
         extent = [float(np.min(xp)), float(np.max(xp)),
                   float(np.min(zp)), float(np.max(zp))]
         n = len(present)
-        cmap = plt.get_cmap('tab20', max(n, 2))
+        # get_cmap(name, N) must be asked for exactly n colours. Asking for
+        # max(n, 2) when only ONE class is present builds a 2-colour map, and
+        # the colorbar then shows a second band with no class attached to it --
+        # the stray blue next to the cyan 'empty floor'.
+        cmap = plt.get_cmap('tab20', n)
         fig, ax = plt.subplots(figsize=(7.0, 5.2))
         im = ax.imshow(img, origin='lower', extent=extent, cmap=cmap,
                        vmin=-0.5, vmax=n - 0.5, aspect='equal')
@@ -832,9 +840,10 @@ def save_object_map(node, step, prefix='objects'):
         ax.grid(True, ls='--', lw=0.4, alpha=0.4)
         _draw_trail(ax, node)
 
-        cb = fig.colorbar(im, ax=ax, ticks=range(n), fraction=0.046, pad=0.04)
+        cb = fig.colorbar(im, ax=ax, ticks=list(range(n)), fraction=0.046, pad=0.04)
         cb.ax.set_yticklabels([vf.CLASSES[k] if k < len(vf.CLASSES) else '?'
                                for k in present], fontsize=7)
+        cb.ax.set_ylabel('most likely class per cell', fontsize=7)
         fig.tight_layout()
         fig.savefig(os.path.join(node.save_dir, f"{prefix}_{step:03d}.png"), dpi=120)
         plt.close(fig)
@@ -1004,16 +1013,29 @@ def save_vision_class_maps(node, step, prefix='vision_classes'):
             ax_e, ax_p = axes[2 * r][c], axes[2 * r + 1][c]
             ax_e.axis('on'); ax_p.axis('on')
             ev = np.maximum(beta[:, :, i] - prior_per_class[i], 0.0)
-            _panel(ax_e, ev, free, xp, zp, f"{cname}\nevidence")
-            _panel(ax_p, post[:, :, i], free, xp, zp, f"{cname}\nposterior")
+            im_e = _panel(ax_e, ev, free, xp, zp, f"{cname}\nevidence")
+            im_p = _panel(ax_p, post[:, :, i], free, xp, zp, f"{cname}\nposterior")
+            # Each panel is normalised to its own range, so the bar reads 0..1
+            # as "lowest..highest IN THIS PANEL" -- the absolute values differ
+            # per panel and are printed in the title instead.
+            for ax_, im_, arr_ in ((ax_e, im_e, ev), (ax_p, im_p, post[:, :, i])):
+                cb = fig.colorbar(im_, ax=ax_, fraction=0.046, pad=0.04)
+                cb.ax.tick_params(labelsize=6)
+                vals = np.asarray(arr_, float)[free]
+                if vals.size:
+                    cb.ax.set_ylabel(f"{vals.min():.2g} .. {vals.max():.2g}",
+                                     fontsize=6)
 
         # 'unobserved' is a MASK, not a class -- shown last so the distinction
         # is visible rather than implied.
         r, c = divmod(len(classes), ncol)
         ax_u = axes[2 * r][c]
         ax_u.axis('on')
-        _panel(ax_u, (~observed).astype(float), free, xp, zp,
-               "unobserved = bright\n(no evidence yet)")
+        im_u = _panel(ax_u, (~observed).astype(float), free, xp, zp,
+                      "unobserved = bright\n(no evidence yet)")
+        cb = fig.colorbar(im_u, ax=ax_u, fraction=0.046, pad=0.04)
+        cb.ax.tick_params(labelsize=6)
+        cb.ax.set_ylabel('0 = seen, 1 = unseen', fontsize=6)
 
         fig.suptitle(f"vision object map by class -- {node.phase} step {step}",
                      fontsize=12)
@@ -1034,3 +1056,92 @@ def save_all_diagnostics(node, step, prefix=''):
     save_modality_diagnostics(node, step, prefix=f"{tag}diag" if tag else "diag")
     save_vision_class_maps(node, step,
                            prefix=f"{tag}vision_classes" if tag else "vision_classes")
+    save_cell_csv(node, step, prefix=f"{tag}cells" if tag else "cells")
+
+
+def save_cell_csv(node, step, prefix='cells', top_n=None):
+    """Per-cell dump of every quantity that feeds the belief, as CSV.
+
+    One row per FREE cell, one file per step. This exists so a surprising peak
+    can be traced to the number that caused it, instead of being inferred from
+    a colour in a heatmap -- the per-class Dirichlet evidence in particular is
+    invisible in any of the rendered figures.
+
+    Columns
+    -------
+    x, y                     cell centre in map coordinates
+    dist_robot               range from the robot at this step
+    olf_loglik, olf_post     olfaction: THIS step's likelihood, and the
+                             accumulated posterior
+    snd_loglik, snd_post     audition, same split (absent in VO runs)
+    vis_like, vis_post       vision: semantic likelihood, and its share of the
+                             normalised visual map
+    fused                    the product actually used for the decision
+    mle_class, observed      what the object map believes, and whether any
+                             evidence has reached the cell at all
+    ev_<class>               raw Dirichlet evidence per class, prior removed
+    post_<class>             per-class posterior p(class | cell)
+
+    top_n limits the file to the highest-fused cells; None writes every free
+    cell (a few hundred rows on a room-sized grid, which is small).
+    """
+    try:
+        import pandas as pd
+        xp, zp, free = node.x_points, node.z_points, node.free_mask
+        X, Z = node.gridX, node.gridZ
+        beta = node.objectMap
+        post = vf.object_posterior(beta) if beta is not None else None
+        observed = vf.observed_mask(beta) if beta is not None else None
+        prior_per_class = vf.PRIOR_STRENGTH * vf.PRIOR
+
+        sel = free.ravel()
+        rows = dict(
+            x=X.ravel()[sel], y=Z.ravel()[sel],
+            dist_robot=np.hypot(X - node.robot_map_posX,
+                                Z - node.robot_map_posY).ravel()[sel],
+        )
+
+        def add(name, arr):
+            if arr is None:
+                return
+            a = np.asarray(arr, float)
+            if a.shape == free.shape:
+                rows[name] = a.ravel()[sel]
+
+        add('olf_loglik', getattr(node, 'olf_loglik_step', None))
+        add('olf_post', node.p_olf if node.use_O else None)
+        add('snd_loglik', getattr(node, 'snd_loglik_step', None))
+        add('snd_post', node.p_snd if node.use_A else None)
+        add('vis_post', node.p_vis if node.use_V else None)
+        add('fused', node.p_fused)
+
+        if post is not None:
+            # The unnormalised semantic likelihood, i.e. what the class
+            # posterior and the goal similarity actually produce for this cell
+            # BEFORE normalisation rescales everything.
+            try:
+                sim = vf.class_goal_similarity(node.goal_phrase) \
+                    if getattr(node, 'goal_phrase', None) else None
+                if sim is not None:
+                    add('vis_like', np.tensordot(post, sim, axes=([2], [0])))
+            except Exception:
+                pass
+            rows['observed'] = observed.ravel()[sel]
+            mle = np.argmax(post, axis=2).ravel()[sel]
+            rows['mle_class'] = [vf.CLASSES[k] if k < len(vf.CLASSES) else '?'
+                                 for k in mle]
+            for i, cname in enumerate(vf.CLASSES):
+                safe = cname.replace(' ', '_')
+                rows[f'ev_{safe}'] = np.maximum(
+                    beta[:, :, i] - prior_per_class[i], 0.0).ravel()[sel]
+                rows[f'post_{safe}'] = post[:, :, i].ravel()[sel]
+
+        df = pd.DataFrame(rows)
+        if 'fused' in df:
+            df = df.sort_values('fused', ascending=False)
+            if top_n:
+                df = df.head(top_n)
+        df.to_csv(os.path.join(node.save_dir, f"{prefix}_{step:03d}.csv"),
+                  index=False, float_format='%.6g')
+    except Exception as e:
+        node.get_logger().warn(f"cell CSV failed at step {step}: {e}")
