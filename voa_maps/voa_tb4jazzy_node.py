@@ -78,8 +78,7 @@ from . import rosFunctions as rf
 # the Robuddy node and so an ablation can still run vision-only.
 DEFAULT_MODALITIES = 'VO'
 
-OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
-                  'oven', 'sink', 'refrigerator', 'clock']
+OBJECT_CLASSES = ['Cardboard box', 'First aid box', 'Humidifier']
 
 # --- topics / frames ---
 RGB_TOPIC = '/oakd/rgb/image_raw/compressed'
@@ -177,7 +176,7 @@ SND_SIGMA_DB = 7.5
 # at that moment, which removes an assumption the run otherwise depends on
 # silently. Re-measure and update this if the sensor, room, or heater
 # warm-up state changes -- it is not re-checked at runtime.
-MQ3_BASELINE = 450.0
+MQ3_BASELINE = 150.0
 
 # Emission-rate hypotheses, in the plume model's units. THE SPAN IS THE THING
 # THAT MATTERS, not the number of points.
@@ -203,9 +202,9 @@ MQ3_BASELINE = 450.0
 Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(np.log10(5), np.log10(200), 7))
 
 # --- fusion / termination ---
-W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
+W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.1
 ENTROPY_FRAC = 0.7
-MAX_STEPS = 3
+MAX_STEPS = 5
 
 # --- initialization phase: 5 egocentric views before search ---
 # Mirrors initialize_envKnowledge in the AI2-THOR simulation, which rotates
@@ -248,7 +247,7 @@ class VAOTurtleBot4(Node):
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
-        self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
+        self.declare_parameter('yolo_path', 'voa_maps/models/YOLO/yolo26x_FTneth232.pt')
         self.declare_parameter('save_dir', '')
         self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
