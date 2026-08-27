@@ -314,7 +314,7 @@ CAMERA_SETTLE_S = 0.6
 # initialization. Without it the object map only ever sees whichever direction
 # the robot happened to be facing when nav2 finished driving.
 SCAN_DURING_SEARCH = True
-FREE_EVIDENCE = 3.0
+FREE_EVIDENCE = 0.5
 
 
 class ReSpeaker:
