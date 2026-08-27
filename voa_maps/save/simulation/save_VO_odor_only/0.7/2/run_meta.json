@@ -1,0 +1,29 @@
+{
+  "condition": "odor_only",
+  "scene": "FloorPlan1",
+  "target_items": [
+    "GarbageCan_a3dd7762"
+  ],
+  "run": 2,
+  "odor": "rotten food smell",
+  "sound": null,
+  "modalities": "VO",
+  "nav_mode": "greedy",
+  "trigger_mode": "fused",
+  "entropy_frac": 0.7,
+  "team_size": 2,
+  "steps": 15,
+  "behavior_flag": "goal_navigation",
+  "terminated": true,
+  "source_x": -1.9335005283355713,
+  "source_z": 2.029001474380493,
+  "q_s_map": 2236.0679774997902,
+  "q_s_posterior": [
+    0.1649092641881863,
+    0.3665674438908499,
+    0.460009601425666,
+    0.00851355176580351,
+    1.387294941785824e-07
+  ],
+  "q_s_converged": false
+}

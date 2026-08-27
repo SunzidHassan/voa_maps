@@ -1,0 +1,2 @@
+team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
+2,4,6.026,"[3.51, 2.516]",8.0,0.6389801462911581,0.7465411157039608,Stool,True

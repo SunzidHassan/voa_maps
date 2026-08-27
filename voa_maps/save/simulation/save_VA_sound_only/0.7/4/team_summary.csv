@@ -1,0 +1,2 @@
+team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
+2,4,5.611,"[2.975, 2.636]",8.0,1.3743552435941657,1.2904609965566662,PaperTowelRoll,True

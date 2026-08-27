@@ -1,0 +1,38 @@
+{
+  "condition": "odor_and_sound",
+  "scene": "FloorPlan401",
+  "target_items": [
+    "Toilet_5404df9d"
+  ],
+  "run": 2,
+  "odor": "human waste smell",
+  "sound": "a toilet flushing",
+  "modalities": "VAO",
+  "nav_mode": "greedy",
+  "trigger_mode": "fused",
+  "entropy_frac": 0.7,
+  "team_size": 2,
+  "steps": 5,
+  "behavior_flag": "goal_navigation",
+  "terminated": true,
+  "source_x": 0.04902547597885132,
+  "source_z": 3.0971572399139404,
+  "q_s_map": 1495.34878122122,
+  "q_s_posterior": [
+    0.2244016783951241,
+    0.40181624608327854,
+    0.31205393703356504,
+    0.06029507286383349,
+    0.0014330656241987722
+  ],
+  "q_s_converged": false,
+  "L0_map": 75.0,
+  "L0_posterior": [
+    0.0012559377330880338,
+    0.4139517601493745,
+    0.5846488061192293,
+    0.0001434959977537164,
+    5.544091378980091e-13
+  ],
+  "L0_converged": false
+}
