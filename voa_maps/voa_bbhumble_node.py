@@ -98,7 +98,7 @@ from . import rosFunctions as rf
 #     check rather than being accumulated, so a stray 'bottle' cannot dilute
 #     the semantic map.
 # Set to None to take every class the loaded model reports instead.
-OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+OBJECT_CLASSES = ['person', 'couch', 'toilet', 'microwave',
                   'oven', 'sink', 'refrigerator', 'clock']
 
 # --- topics / frames ---
@@ -280,8 +280,8 @@ MQ3_BASELINE = 150.0
 Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(np.log10(5), np.log10(200), 7))
 
 # --- fusion / termination ---
-W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
-ENTROPY_FRAC = 0.7
+W_VISION, W_OLFACT, W_SOUND = 1.0, 0.1, 0.1
+ENTROPY_FRAC = 0.96
 MAX_STEPS = 3
 
 # --- initialization phase: 5 egocentric views before search ---
