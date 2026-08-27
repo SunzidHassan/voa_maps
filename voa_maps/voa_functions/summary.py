@@ -135,7 +135,7 @@ def collect_runs(base_path="save"):
     return rows
 
 
-def generate_summary(base_path="save", out_name="flat_summary.csv"):
+def generate_summary(base_path="save/simulation", out_name="flat_summary.csv"):
     """Write one flat CSV over every run, plus a grouped console report."""
     print("=" * 60)
     print(f"VOA summary from: {base_path}")

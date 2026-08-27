@@ -41,7 +41,7 @@ import networkx as nx
 from shapely.geometry import Polygon
 from skimage.morphology import closing, disk
 
-from voa_functions.visionFunction import (
+from ...voa_functions.visionFunction import (
     visionBranch,
     initialize_envKnowledge,
     add_goal_similarity,
@@ -55,7 +55,7 @@ from voa_functions.visionFunction import (
     EMPTY_CLASS,
 )
 
-from voa_functions.olfactionFunctions import simChemicalReading
+from ...voa_functions.olfactionFunctions import simChemicalReading
 
 # Candidate source strengths, tracked online instead of assumed. Guessing is
 # not safe: measured on a 4 m grid, an emission rate wrong by 10x moved
@@ -109,14 +109,14 @@ L0_HYPOTHESES = tuple(np.linspace(45.0, 105.0, 5))     # 45 .. 105 dB at 1 m
 OLF_SIGMA_LOG = 0.25 * SIGMA_INFLATION        # log-concentration
 SND_SIGMA_DB = 2.5 * SIGMA_INFLATION          # dB
 
-from voa_functions.navigation import cell_centers
+from ...voa_functions.navigation import cell_centers
 
-from voa_functions.hypotheses import (
+from ...voa_functions.hypotheses import (
     ScaleHypotheses, log_space_grid, db_grid,
     olfactory_predictor, auditory_predictor,
 )
 
-from voa_functions.soundFunctions import (
+from ...voa_functions.soundFunctions import (
     init_sound_map,
     update_sound_map,
     sound_posterior,
@@ -125,14 +125,14 @@ from voa_functions.soundFunctions import (
     class_sound_similarity,
 )
 
-from voa_functions.utils import (
+from ...voa_functions.utils import (
     parse_position_string,
     find_nearest_node,
     create_graph_from_positions,
     grid_to_world,
 )
 
-from voa_functions.loggerFunctions import map_entropy, plot_detected_objects
+from ...voa_functions.loggerFunctions import map_entropy, plot_detected_objects
 
 LABEL_FONTSIZE = 16
 

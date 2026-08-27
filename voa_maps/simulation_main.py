@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 from ai2thor.controller import Controller
 from ultralytics import YOLO
 
-from ControlAlgorithms.AI2Thor.ai2thor_controller import fusion_control
+from .ControlAlgorithms.AI2Thor.ai2thor_controller import fusion_control
 # from ControlAlgorithms.RandomWalk.random_controller import randomWalk_control
 
 from .voa_functions.utils import world_to_grid, get_iThor_object_centers
@@ -44,7 +44,7 @@ from .voa_functions.loggerFunctions import (
 )
 from .voa_functions.summary import generate_summary
 
-yolo_model = YOLO("models/YOLO/yolo26mFT2.pt")
+yolo_model = YOLO("voa_maps/models/YOLO/yolo26mFT2.pt")
 
 # ============================================================= CONFIG
 
@@ -73,8 +73,8 @@ CONDITIONS = [
         "target_items": ["GarbageCan_a3dd7762"],
         "odor": "rotten food smell",
         "sound": None,
-        "position_csvs": ["simulation_configs/GarbageCanPositions_1.csv",
-                          "simulation_configs/GarbageCanPositions_2.csv"],
+        "position_csvs": ["voa_maps/simulation_configs/GarbageCanPositions_1.csv",
+                          "voa_maps/simulation_configs/GarbageCanPositions_2.csv"],
     },
     {
         "name": "sound_only",
@@ -84,13 +84,13 @@ CONDITIONS = [
         "odor": "",                       # odourless -> no olfactory branch
         "sound": {
             "label": "an alarm clock ringing",
-            "audio_path": "assets/sounds/clock_alarm.wav",   # ESC-50 clip if present
+            "audio_path": "voa_maps/assets/sounds/clock_alarm.wav",   # ESC-50 clip if present
             "interval_steps": 3,          # discrete: emits every 3rd step
             "continuous": False,
             "L0_db": 70.0,
         },
-        "position_csvs": ["simulation_configs/ClockPositions_1.csv",
-                          "simulation_configs/ClockPositions_2.csv"],
+        "position_csvs": ["voa_maps/simulation_configs/ClockPositions_1.csv",
+                          "voa_maps/simulation_configs/ClockPositions_2.csv"],
     },
     {
         "name": "odor_and_sound",
@@ -100,13 +100,13 @@ CONDITIONS = [
         "odor": "human waste smell",
         "sound": {
             "label": "a toilet flushing",
-            "audio_path": "assets/sounds/toilet_flush.wav",
+            "audio_path": "voa_maps/assets/sounds/toilet_flush.wav",
             "interval_steps": 4,
             "continuous": False,
             "L0_db": 75.0,
         },
-        "position_csvs": ["simulation_configs/ToiletPositions_1.csv",
-                          "simulation_configs/ToiletPositions_2.csv"],
+        "position_csvs": ["voa_maps/simulation_configs/ToiletPositions_1.csv",
+                          "voa_maps/simulation_configs/ToiletPositions_2.csv"],
     },
 ]
 
@@ -184,7 +184,7 @@ def run_condition(cond, modalities):
 
     try:
         for entropy_frac in ENTROPY_FRACS:
-            base_save_dir = os.path.join("save/simulation", alg_folder, str(entropy_frac))
+            base_save_dir = os.path.join("voa_maps/save/simulation", alg_folder, str(entropy_frac))
             os.makedirs(base_save_dir, exist_ok=True)
 
             for run_idx, starts in enumerate(start_pairs):
