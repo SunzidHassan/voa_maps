@@ -2,28 +2,28 @@
   "condition": "odor_only",
   "scene": "FloorPlan1",
   "target_items": [
-    "GarbageCan_a3dd7762"
+    "Toaster_f30a9b32"
   ],
   "run": 3,
-  "odor": "rotten food smell",
+  "odor": "smoke",
   "sound": null,
   "modalities": "VO",
   "nav_mode": "greedy",
   "trigger_mode": "fused",
   "entropy_frac": 0.7,
   "team_size": 2,
-  "steps": 14,
+  "steps": 19,
   "behavior_flag": "goal_navigation",
   "terminated": true,
-  "source_x": -1.9335005283355713,
-  "source_z": 2.029001474380493,
+  "source_x": -1.8267384767532349,
+  "source_z": 0.13400045037269592,
   "q_s_map": 2236.0679774997902,
   "q_s_posterior": [
-    0.14958782855109704,
-    0.35770595442726627,
-    0.47790967640763116,
-    0.01479571542385283,
-    8.251901526337217e-07
+    0.0004710657759341076,
+    0.18710302702575765,
+    0.645570503834139,
+    0.16639695975393604,
+    0.0004584436102330624
   ],
   "q_s_converged": false
 }

@@ -1,2 +1,2 @@
 team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
-2,12,7.346,"[3.5, 3.846]",0.0,0.21230320922128512,0.4344695542652694,GarbageCan,True
+2,27,9.5,"[5.5, 4.0]",0.0,1.3036436621225853,0.8348367531787256,apple,True
