@@ -138,8 +138,8 @@ LABEL_FONTSIZE = 16
 
 # Per-modality log-evidence weights (lambda_V, lambda_O, lambda_A).
 W_VISION = 1.0
-W_OLFACT = 1.0
-W_SOUND = 1.0
+W_OLFACT = 0.5
+W_SOUND = 0.5
 
 # ---------------------------------------------------------------- TRIGGER
 # ONE condition ends the search:

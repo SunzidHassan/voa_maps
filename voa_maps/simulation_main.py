@@ -44,7 +44,8 @@ from .voa_functions.loggerFunctions import (
 )
 from .voa_functions.summary import generate_summary
 
-yolo_model = YOLO("voa_maps/models/YOLO/yolo26mFT2.pt")
+# yolo_model = YOLO("voa_maps/models/YOLO/yolo26mFT2.pt")
+yolo_model = YOLO("voa_maps/models/YOLO/yolo26m.pt")
 
 # ============================================================= CONFIG
 
@@ -52,6 +53,18 @@ STEP_THRESHOLD = 100
 ENTROPY_FRACS = [0.7]
 SIGMA_NOISE = 20
 GRID_STEP = 0.25
+
+# Single source of truth for where runs land. Every writer AND every reader
+# (generate_batch_summary, generate_summary) must agree on this -- they
+# previously did not: runs were written under voa_maps/save/simulation, but
+# both summary calls passed the bare "save", which os.path.join(os.getcwd(),
+# base_root) resolves to <cwd>/save. Since this script is normally launched
+# as `python3 -m voa_maps.simulation_main` from the OUTER voa_maps/ (the
+# package root, one level above this file), cwd is that outer directory and
+# "save" pointed at a directory that was never created -- hence
+# "Cannot save file into a non-existent directory" and "'save' does not
+# exist. Nothing to summarise." even though the runs themselves succeeded.
+SAVE_ROOT = "voa_maps/save/simulation"
 
 # Full ablation: ['VAO', 'VA', 'VO', 'AO', 'V', 'A', 'O']
 MODALITY_SETS = ['VAO', 'VA', 'VO']
@@ -70,11 +83,11 @@ CONDITIONS = [
         "name": "odor_only",
         "scene": "FloorPlan1",
         "agent_y": 0.9,
-        "target_items": ["GarbageCan_a3dd7762"],
-        "odor": "rotten food smell",
+        "target_items": ["Toaster_f30a9b32"],
+        "odor": "smoke",
         "sound": None,
-        "position_csvs": ["voa_maps/simulation_configs/GarbageCanPositions_1.csv",
-                          "voa_maps/simulation_configs/GarbageCanPositions_2.csv"],
+        "position_csvs": ["voa_maps/simulation_configs/ToasterPositions_1.csv",
+                          "voa_maps/simulation_configs/ToasterPositions_2.csv"],
     },
     {
         "name": "sound_only",
@@ -184,7 +197,7 @@ def run_condition(cond, modalities):
 
     try:
         for entropy_frac in ENTROPY_FRACS:
-            base_save_dir = os.path.join("voa_maps/save/simulation", alg_folder, str(entropy_frac))
+            base_save_dir = os.path.join(SAVE_ROOT, alg_folder, str(entropy_frac))
             os.makedirs(base_save_dir, exist_ok=True)
 
             for run_idx, starts in enumerate(start_pairs):
@@ -286,7 +299,7 @@ def run_condition(cond, modalities):
 
         try:
             generate_batch_summary(
-                base_root="save", alg_folder=alg_folder,
+                base_root=SAVE_ROOT, alg_folder=alg_folder,
                 param_list=ENTROPY_FRACS, run_count=len(start_pairs),
                 target_items=cond["target_items"], alg_choice='F')
         except Exception as e:
@@ -332,7 +345,7 @@ def main():
 
     print("\nAll conditions complete.")
     try:
-        generate_summary(base_path="save")
+        generate_summary(base_path=SAVE_ROOT)
     except Exception as e:
         print(f"Overall summary failed: {e}")
 

@@ -11,19 +11,43 @@ from .utils import world_to_grid
 # Dirichlet Object Map  (config)
 # ==========================
 
-# Classes YOLO is allowed to report.
-TARGET_NAMES = ['Apple', 'Book', 'Bottle', 'Bowl', 'Bread', 'ButterKnife', 'Cabinet',
-                'CoffeeMachine', 'CounterTop', 'CreditCard', 'Cup', 'DishSponge',
-                'Drawer', 'Egg', 'Faucet', 'Fork', 'Fridge', 'GarbageCan', 'HousePlant',
-                'Kettle', 'Knife', 'Lettuce', 'LightSwitch', 'Microwave', 'Mug', 'Pan',
-                'PaperTowelRoll', 'PepperShaker', 'Plate', 'Pot', 'Potato', 'SaltShaker',
-                'Shelf', 'ShelvingUnit', 'Sink', 'SoapBottle', 'Spatula', 'Spoon',
-                'Statue', 'Stool', 'StoveBurner', 'StoveKnob', 'Toaster', 'Tomato',
-                'Vase', 'WineBottle']
+# For the ai2thor kitchen items fine tuned model
+TARGET_NAMES = [
+    "oven",
+    "microwave",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "clock",
+    "vase",
+    "tv",
+    "laptop",
+    "bottle",
+    "banana",
+    "apple",
+]
 
-# Classes dropped before they ever reach the map.
-EXCLUDE_NAMES = ['Cabinet', 'Cabinet_opened', 'CounterTop', 'Drawer', 'Drawer_opened',
-                 'Floor', 'Shelf', 'Window', 'Apple_sliced', 'Bowl_filled']
+EXCLUDE_NAMES = []
+
+# # For the ai2thor kitchen items fine tuned model
+# TARGET_NAMES = ['Apple', 'Book', 'Bottle', 'Bowl', 'Bread', 'ButterKnife', 'Cabinet',
+#                 'CoffeeMachine', 'CounterTop', 'CreditCard', 'Cup', 'DishSponge',
+#                 'Drawer', 'Egg', 'Faucet', 'Fork', 'Fridge', 'GarbageCan', 'HousePlant',
+#                 'Kettle', 'Knife', 'Lettuce', 'LightSwitch', 'Microwave', 'Mug', 'Pan',
+#                 'PaperTowelRoll', 'PepperShaker', 'Plate', 'Pot', 'Potato', 'SaltShaker',
+#                 'Shelf', 'ShelvingUnit', 'Sink', 'SoapBottle', 'Spatula', 'Spoon',
+#                 'Statue', 'Stool', 'StoveBurner', 'StoveKnob', 'Toaster', 'Tomato',
+#                 'Vase', 'WineBottle']
+
+# # Classes dropped before they ever reach the map.
+# EXCLUDE_NAMES = ['Cabinet', 'Cabinet_opened', 'CounterTop', 'Drawer', 'Drawer_opened',
+#                  'Floor', 'Shelf', 'Window', 'Apple_sliced', 'Bowl_filled']
 
 # Canonical class axis of the Dirichlet map (index k of the (H, W, K) array).
 # "empty floor" is a real class, not the absence of one.
