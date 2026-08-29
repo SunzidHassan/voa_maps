@@ -1,2 +1,2 @@
 team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
-2,18,8.291,"[3.5, 4.791]",0.0,0.43053085159661897,0.5882883358365854,refrigerator,True
+2,13,7.82,"[3.25, 4.57]",0.0,0.014375331110187042,0.5921008286328664,toaster,True

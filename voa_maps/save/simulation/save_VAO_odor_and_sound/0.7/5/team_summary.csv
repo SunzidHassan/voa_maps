@@ -1,2 +1,2 @@
 team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
-2,5,5.094,"[2.886, 2.208]",8.0,0.8483561718825299,0.8530138584282136,toilet,True
+2,2,4.636,"[2.5, 2.136]",4.0,0.9247477082576827,0.8530138584282136,toilet,True

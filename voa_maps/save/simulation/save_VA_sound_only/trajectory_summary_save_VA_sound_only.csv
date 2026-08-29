@@ -1,8 +1,8 @@
 ,Total Distance Traveled,Steps Taken,Final Distance from Source,Total Step Time,Final Target
 ,0.7,0.7,0.7,0.7,0.7
 Run Number,,,,,
-1,2.71,6,0.033,11.74,clock
-2,3.42,3,0.965,7.18,vase
-3,3.6,9,0.047,16.14,clock
-4,3.72,6,0.061,11.58,clock
-5,4.85,15,0.036,26.43,laptop
+1,2.45,3,0.257,7.24,laptop
+2,2.8,3,0.025,7.19,clock
+3,3.16,3,0.015,7.3,clock
+4,3.55,3,0.039,7.04,vase
+5,3.27,9,1.662,16.86,bed

@@ -1,2 +1,2 @@
 team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
-2,7,6.496,"[3.725, 2.771]",12.0,0.060781535159273085,0.5405834715211383,clock,True
+2,4,6.514,"[3.552, 2.962]",8.0,0.03870563857909783,0.5405834715211383,vase,True
