@@ -47,6 +47,10 @@ from .voa_functions.summary import generate_summary
 # yolo_model = YOLO("voa_maps/models/YOLO/yolo26mFT2.pt")
 yolo_model = YOLO("voa_maps/models/YOLO/yolo26m.pt")
 
+import torch
+torch.manual_seed(42)
+torch.use_deterministic_algorithms(True)
+
 # ============================================================= CONFIG
 
 STEP_THRESHOLD = 100
