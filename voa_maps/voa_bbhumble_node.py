@@ -98,7 +98,7 @@ from . import rosFunctions as rf
 #     check rather than being accumulated, so a stray 'bottle' cannot dilute
 #     the semantic map.
 # Set to None to take every class the loaded model reports instead.
-OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+OBJECT_CLASSES = ['chair', 'couch', 'toilet', 'microwave',
                   'oven', 'sink', 'refrigerator', 'tv']
 
 # --- topics / frames ---
