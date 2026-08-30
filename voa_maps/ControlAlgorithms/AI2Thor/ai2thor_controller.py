@@ -503,7 +503,8 @@ def fusion_control(controller, itemDF, yolo_model, groundTruthSourcePosition,
                    srcProbGivenOlfactory, srcProbGivenVision, srcProbGivenSound,
                    fusedProbMap, olfactoryEntropy, visionEntropy, soundEntropy,
                    fused_entropy, use_A, (srcPosX, srcPosZ),
-                   navKnowledge=navKnowledge, use_O=has_odor, objectMap=objectMap)
+                   navKnowledge=navKnowledge, use_O=has_odor, objectMap=objectMap,
+                   modalities=modalities)
 
         try:
             plot_detected_objects(itemDF=envKnowledge, mask_closed=mask_closed,
@@ -705,68 +706,69 @@ def _cell_object_name(objectMap, row, col):
 
 def _save_maps(save_dir, step_count, robots, x_points, z_points,
                p_olf, p_vis, p_snd, p_fused, h_olf, h_vis, h_snd, h_fused,
-               use_A, src_xz, navKnowledge=None, use_O=True, objectMap=None):
-    """Combined team belief maps: every panel aggregates both robots' evidence."""
+               use_A, src_xz, navKnowledge=None, use_O=True, objectMap=None,
+               modalities='VAO'):
+    """Per-modality belief maps, saved as SEPARATE files -- one PNG per panel,
+    not one combined figure.
+
+    Filenames follow the same {name}_{step:03d}.png convention already used
+    elsewhere in this module (see detected_objects_{step:03d}.png below),
+    with the modality as the name:
+        map_olfactory_NNN.png, map_visual_NNN.png,
+        map_auditory_NNN.png, map_fused_NNN.png
+
+    Only the modalities this run actually uses are written -- an ablated
+    branch still holds a uniform map, and saving it produces a flat panel
+    that reads as a failed sensor rather than a disabled one.
+
+    No title text: the entropy values these titles used to show are already
+    in run_meta.json and the CSV logs, so repeating them as an image title
+    was redundant. No R0/R1 legend either -- each file is one modality now,
+    with nowhere natural for a shared legend to sit; robot identity is still
+    readable from trail + marker colour, just not labelled in-figure.
+    """
     try:
-        # Only draw panels for modalities this run actually uses. An ablated
-        # branch still holds a uniform map, and rendering it produces a flat
-        # panel that reads as a failed sensor rather than a disabled one.
-        # Each panel's peak marker is drawn differently:
-        #   'plain'  -- olfactory/auditory: circle+cross, twice the old size,
-        #               NO text at all (a coordinate label was noise here --
-        #               these two panels are read for SHAPE, not a number).
-        #   'named'  -- vision: same doubled marker, but WITH text: only the
-        #               class name, no coordinates, at 4x the base font size,
-        #               since which object is what these panels are actually
-        #               read for.
-        #   'fused'  -- handled separately below (Robot 0's target only, not
-        #               every panel's own argmax), so fused carries no
-        #               argmax-peak marker of its own.
+        # (internal key, single-letter code used in the saved filename)
+        # matches the paper's own figure naming: sample_{modalities}_O3.png,
+        # sample_{modalities}_V3.png, sample_{modalities}_A3.png,
+        # sample_{modalities}_F3.png -- letter, then step, NO zero-padding
+        # and no separator between them.
         panels = []
         if use_O:
-            panels.append((p_olf, rf'Olfactory  $H={h_olf:.2f}$', 'plain'))
-        panels.append((p_vis, rf'Visual (semantic)  $H={h_vis:.2f}$', 'named'))
+            panels.append((p_olf, 'olfactory', 'plain', 'O'))
+        panels.append((p_vis, 'visual', 'named', 'V'))
         if use_A:
-            panels.append((p_snd, rf'Auditory (DOA)  $H={h_snd:.2f}$', 'plain'))
-        panels.append((p_fused, rf'Fused  $H={h_fused:.2f}$', 'fused'))
+            panels.append((p_snd, 'auditory', 'plain', 'A'))
+        panels.append((p_fused, 'fused', 'fused', 'F'))
 
         extent = [min(x_points), max(x_points), min(z_points), max(z_points)]
-        fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 4.6),
-                                 sharex=True, sharey=True)
-        axes = np.atleast_1d(axes)
+        xmid = 0.5 * (min(x_points) + max(x_points))
+        zmid = 0.5 * (min(z_points) + max(z_points))
 
-        for ax, (arr, title, peak_style) in zip(axes, panels):
+        for arr, name, peak_style, code in panels:
+            fig, ax = plt.subplots(figsize=(5.5, 4.6))
             a = np.asarray(arr, float)
             lo, hi = a.min(), a.max()
             norm = (a - lo) / (hi - lo) if hi > lo + 1e-12 else np.zeros_like(a)
             ax.imshow(norm, origin='lower', extent=extent, aspect='equal', cmap='hot')
-            ax.set_title(title, fontsize=LABEL_FONTSIZE)
-            ax.set_xlabel('x (m)')
-            ax.set_ylabel('z (m)')
+
             ax.plot(src_xz[0], src_xz[1], marker='*', ms=16,
                     mfc='white', mec='black', mew=1.0, ls='')
 
             # Peak of THIS map: the cell this modality alone considers most
-            # likely. Skipped when the map is flat, because argmax on a uniform
-            # array returns cell (0, 0) -- an inactive modality would otherwise
-            # be drawn as confidently pointing at a corner. Skipped entirely
-            # for the fused panel, which gets Robot 0's target marker instead
-            # (drawn separately below) rather than its own argmax marker.
+            # likely. Skipped when the map is flat (an inactive/ablated
+            # modality would otherwise be drawn as confidently pointing at a
+            # corner, since argmax on a uniform array returns cell (0, 0)),
+            # and skipped for 'fused', which gets Robot 0's target marker
+            # below instead of its own argmax marker.
             if peak_style != 'fused' and hi > lo + 1e-12:
                 gi = np.unravel_index(np.argmax(a), a.shape)
                 px, pz = float(x_points[gi[1]]), float(z_points[gi[0]])
-                # DOUBLED marker size (ms=15 -> 30, ms=8 -> 16) for both
-                # 'plain' and 'named' styles -- only the text differs.
                 ax.plot(px, pz, marker='o', ms=30, mfc='none', mec='#39ff14',
                         mew=2.2, ls='', zorder=6)
-                ax.plot(px, pz, marker='+', ms=16, mec='#39ff14', mew=1.4,
-                        ls='', zorder=6)
 
                 if peak_style == 'named':
-                    # Vision only: the class name, nothing else, at 4x the
-                    # base annotation font (7 -> 28).
-                    xmid = 0.5 * (min(x_points) + max(x_points))
-                    zmid = 0.5 * (min(z_points) + max(z_points))
+                    # Vision only: the class name, nothing else.
                     dxo = -12 if px > xmid else 12
                     dzo = -14 if pz > zmid else 12
                     pname = _cell_object_name(objectMap, gi[0], gi[1])
@@ -779,65 +781,63 @@ def _save_maps(save_dir, step_count, robots, x_points, z_points,
                                 annotation_clip=False,
                                 path_effects=[pe.withStroke(linewidth=2.2,
                                                             foreground='black')])
-                # 'plain' (olfactory/auditory): marker only, no annotate() call
-                # at all -- a coordinate label was noise on these two panels.
+                # 'plain' (olfactory/auditory): marker only, no annotate().
 
             for rb in robots:
                 tr = np.array(rb.trail)
                 ax.plot(tr[:, 0], tr[:, 1], '-', lw=1.4, color=rb.color, alpha=0.85)
+                # No label= here -- that is what used to feed the R0/R1
+                # legend. Robot identity is still visible from marker/trail
+                # colour without it.
                 ax.plot(rb.x, rb.z, marker='o', ms=8, mfc=rb.color,
-                        mec='white', mew=1.2, ls='', label=f'R{rb.id}')
+                        mec='white', mew=1.2, ls='')
+
+            # Robot 0's TARGET, fused panel only. Drawn via robot_target(),
+            # the same call the navigation uses, so the labelled object is by
+            # construction the one being approached rather than a re-derived
+            # guess.
+            if name == 'fused' and navKnowledge is not None and robots:
+                rb0 = robots[0]
+                tname, ox, oz = robot_target(navKnowledge, p_fused,
+                                             x_points, z_points, rank=rb0.id)
+                ax.plot(ox, oz, marker='o', ms=22, mfc='none', mec=rb0.color,
+                        mew=1.6, ls='', zorder=5)
+                ax.plot([rb0.x, ox], [rb0.z, oz], ls=':', lw=1.4,
+                        color=rb0.color, alpha=0.9, zorder=4)
+                dx = -10 if ox > xmid else 10
+                dz = -12 if oz > zmid else 10
+                ax.annotate(tname,
+                            xy=(ox, oz), xytext=(dx, dz),
+                            textcoords='offset points',
+                            ha='right' if dx < 0 else 'left',
+                            va='top' if dz < 0 else 'bottom',
+                            fontsize=18, fontweight='bold', color=rb0.color,
+                            annotation_clip=True,
+                            path_effects=[pe.withStroke(linewidth=2.4,
+                                                        foreground='white')])
+
             ax.grid(True, ls='--', lw=0.4, alpha=0.5)
             divider = make_axes_locatable(ax)
-            cax = divider.append_axes("right", size="5%", pad=0.1)
+            # pad increased (0.025 -> 0.15 inch) for real separation between
+            # the panel and its colorbar.
+            cax = divider.append_axes("right", size="5%", pad=0.15)
             sm = cm.ScalarMappable(cmap='hot', norm=mcolors.Normalize(0, 1))
             sm.set_array([])
             plt.colorbar(sm, cax=cax)
 
-        # Mark Robot 0's TARGET on the fused panel only -- not every robot's,
-        # just Robot 0's, per the current spec. Drawn via robot_target(), the
-        # same call the navigation uses, so the labelled object is by
-        # construction the one being approached rather than a re-derived
-        # guess. Marker doubled (ms=11 -> 22); annotation cut to the object
-        # name only (no "R0 ->" prefix, no coordinates) at 4x the base font
-        # (8 -> 32).
-        if navKnowledge is not None and p_fused is not None and robots:
-            ax = axes[-1]
-            rb0 = robots[0]
-            name, ox, oz = robot_target(navKnowledge, p_fused,
-                                        x_points, z_points, rank=rb0.id)
-            ax.plot(ox, oz, marker='D', ms=22, mfc=rb0.color, mec='white',
-                    mew=1.6, ls='', zorder=5)
-            ax.plot([rb0.x, ox], [rb0.z, oz], ls=':', lw=1.4,
-                    color=rb0.color, alpha=0.9, zorder=4)
-            xmid = 0.5 * (min(x_points) + max(x_points))
-            zmid = 0.5 * (min(z_points) + max(z_points))
-            dx = -10 if ox > xmid else 10
-            dz = -12 if oz > zmid else 10
-            ax.annotate(name,
-                        xy=(ox, oz), xytext=(dx, dz),
-                        textcoords='offset points',
-                        ha='right' if dx < 0 else 'left',
-                        va='top' if dz < 0 else 'bottom',
-                        fontsize=18, fontweight='bold', color=rb0.color,
-                        annotation_clip=True,
-                        path_effects=[pe.withStroke(linewidth=2.4,
-                                                    foreground='white')])
-
-        # Legend at figure level, not inside a panel -- an in-axes legend sat
-        # in the top-right corner and covered the peak label whenever the
-        # argmax landed there, which is exactly the case worth seeing.
-        handles, labels = axes[0].get_legend_handles_labels()
-        seen, h2, l2 = set(), [], []
-        for h, l in zip(handles, labels):
-            if l not in seen:
-                seen.add(l); h2.append(h); l2.append(l)
-        plt.tight_layout(rect=(0, 0.06, 1, 1))
-        if h2:
-            fig.legend(h2, l2, loc='lower center', ncol=max(len(h2), 2),
-                       fontsize=9, frameon=False)
-        fig.savefig(os.path.join(save_dir, f"maps_team_{step_count:03d}.png"), dpi=130)
-        plt.close(fig)
+            plt.tight_layout()
+            # bbox_inches='tight' crops the SAVED canvas to the actual
+            # rendered content (axes + colorbar + ticks), not just the fixed
+            # figsize. tight_layout() alone only rearranges the subplot
+            # within that fixed canvas -- it does not shrink the canvas
+            # itself, so any slack (e.g. from aspect='equal' shrinking the
+            # axes box to match the room's aspect ratio) was previously
+            # saved as plain white margin. pad_inches keeps a small border
+            # rather than cropping flush to the pixels.
+            fig.savefig(os.path.join(
+                save_dir, f"sample_{modalities}_{code}{step_count}.png"),
+                dpi=130, bbox_inches='tight', pad_inches=0.05)
+            plt.close(fig)
     except Exception as e:
         print(f"Map plot failed at step {step_count}: {e}")
         plt.close('all')
