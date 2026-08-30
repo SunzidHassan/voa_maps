@@ -1,2 +1,2 @@
 team_size,steps,team_distance,per_robot_distance,total_listen_s,final_target_error,final_min_gt_distance,final_target_object,terminated
-2,14,8.0,"[3.5, 4.5]",0.0,0.04500769106464609,0.5882883358365854,oven,True
+2,14,8.025,"[3.75, 4.275]",0.0,0.015537685786249101,0.5882883358365854,toaster,True

@@ -1,8 +1,8 @@
 ,Total Distance Traveled,Steps Taken,Final Distance from Source,Total Step Time,Final Target
 ,0.7,0.7,0.7,0.7,0.7
 Run Number,,,,,
-1,3.25,12,0.014,14.61,toaster
-2,3.5,13,0.045,16.02,oven
-3,4.5,14,0.085,15.38,toaster
-4,4.5,13,0.087,14.04,toaster
-5,4.77,13,0.035,13.39,toaster
+1,3.25,12,0.014,13.72,toaster
+2,3.75,13,0.016,16.82,toaster
+3,4.5,14,0.085,16.93,toaster
+4,4.5,13,0.087,15.92,toaster
+5,4.77,13,0.035,14.74,toaster
