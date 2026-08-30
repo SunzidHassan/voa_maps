@@ -1,0 +1,150 @@
+(voaMaps) sunzid@ssjet:~/workspaces/ssjet_ws/src/voa_maps$ python3 -m voa_maps.voa_bbhumble_node --ros-args -p modalities:=VA
+/home/sunzid/workspaces/ssjet_ws/voaMaps/lib/python3.10/site-packages/torch/cuda/__init__.py:188: UserWarning: CUDA initialization: The NVIDIA driver on your system is too old (found version 12060). Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx Alternatively, go to: https://pytorch.org to install a PyTorch version that has been compiled with your version of the CUDA driver. (Triggered internally at /__w/pytorch/pytorch/c10/cuda/CUDAFunctions.cpp:119.)
+  return torch._C._cuda_getDeviceCount() > 0
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 199/199 [00:00<00:00, 1355.39it/s]
+[INFO] [1788130988.021677121] [voa_bb_node]: YOLO loaded from models/YOLO/yolo26m.pt
+[INFO] [1788130988.022860364] [voa_bb_node]: object-map classes (9 from the detector): ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv']
+[ReSpeaker] OK -- found VID 0x2886 PID 0x001a at bus 1 address 5
+[INFO] [1788130988.066008143] [voa_bb_node]: modalities=VA  save_dir=/home/sunzid/workspaces/ssjet_ws/src/voa_maps/voa_maps/save/bb/voa_run_2026-08-30_180307/VA
+[INFO] [1788130988.788862110] [voa_bb_node]: audio level stream open (16000 Hz, 2 ch) -- L0 range hypothesis active
+[INFO] [1788130988.919701957] [voa_bb_node]: step 0 (pre-sensing): H_max 8.72 bits over 423 free cells, trigger 1.000
+[INFO] [1788130988.920574196] [voa_bb_node]: grid 27x20 (540 cells, 423 free), H_max 8.72 bits
+[INFO] [1788130988.992153638] [voa_bb_node]: camera OK -- RGB 1280x720, depth 1280x720 (uint16)
+[INFO] [1788130989.096446172] [voa_bb_node]: === INITIALIZATION: 6 orthogonal views ===
+[WARN] [1788130994.917114344] [voa_bb_node]: detector reported ['book', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788130996.666198471] [voa_bb_node]: init_00: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788130996.667636012] [voa_bb_node]: --- init view 1/6 @ (0.33, 6.13) ---
+[INFO] [1788130996.669261985] [voa_bb_node]: --- step 0 @ (0.33, 6.13) yaw 172 deg ---
+[INFO] [1788130996.670328963] [voa_bb_node]:   vision     1 detection(s)
+[INFO] [1788130996.671100554] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788130996.671847343] [voa_bb_node]:       tv                0.92   2.35m    -2.03     6.23   0.148
+[INFO] [1788130996.675530850] [voa_bb_node]:     listening OPENED at t=1788130996.67 (scheduled 1788130991.30, late by +5.376s)
+[INFO] [1788130999.692353994] [voa_bb_node]:     listening CLOSED at t=1788130999.69, was open for 3.017s (intended 3.0s), doa_thread_alive=True
+[sound] CLAP unavailable (No module named 'laion_clap'); falling back to SBERT text matching.
+[INFO] [1788131001.127554661] [voa_bb_node]:     DOA diag: 59 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 59 accepted, 0 read/reject failures
+[INFO] [1788131001.128410069] [voa_bb_node]:   [init view 1/6] audition 59 DOA samples
+[WARN] [1788131013.093254030] [voa_bb_node]: detector reported ['sports ball'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131014.853966864] [voa_bb_node]: init_01: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131014.855621805] [voa_bb_node]: --- init view 2/6 @ (0.33, 6.09) ---
+[INFO] [1788131014.857082296] [voa_bb_node]: --- step 0 @ (0.33, 6.09) yaw -117 deg ---
+[INFO] [1788131014.858470620] [voa_bb_node]:   vision     1 detection(s)
+[INFO] [1788131014.859802843] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788131014.861274407] [voa_bb_node]:       microwave         0.85   4.08m    -0.36     1.87   0.245
+[INFO] [1788131014.864950084] [voa_bb_node]:     listening OPENED at t=1788131014.86 (scheduled 1788131011.09, late by +3.772s)
+[INFO] [1788131017.893680883] [voa_bb_node]:     listening CLOSED at t=1788131017.89, was open for 3.028s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131017.896736023] [voa_bb_node]:     DOA diag: 59 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 59 accepted, 0 read/reject failures
+[INFO] [1788131017.897574760] [voa_bb_node]:   [init view 2/6] audition 59 DOA samples
+[WARN] [1788131029.397897935] [voa_bb_node]: detector reported ['bottle'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131031.140593285] [voa_bb_node]: init_02: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131031.141532673] [voa_bb_node]: --- init view 3/6 @ (0.24, 6.10) ---
+[INFO] [1788131031.142460315] [voa_bb_node]: --- step 0 @ (0.24, 6.10) yaw -48 deg ---
+[INFO] [1788131031.143208388] [voa_bb_node]:   vision     2 detection(s)
+[INFO] [1788131031.143977967] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788131031.144863334] [voa_bb_node]:       couch             0.59   1.30m     1.38     5.38   0.110
+[INFO] [1788131031.146355735] [voa_bb_node]:       couch             0.55   1.30m     1.37     5.37   0.110
+[INFO] [1788131031.150541040] [voa_bb_node]:     listening OPENED at t=1788131031.15 (scheduled 1788131027.29, late by +3.857s)
+[INFO] [1788131034.215125146] [voa_bb_node]:     listening CLOSED at t=1788131034.21, was open for 3.065s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131034.217332562] [voa_bb_node]:     DOA diag: 60 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 60 accepted, 0 read/reject failures
+[INFO] [1788131034.218246284] [voa_bb_node]:   [init view 3/6] audition 60 DOA samples
+[WARN] [1788131047.654321970] [voa_bb_node]: init_03: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131047.655714685] [voa_bb_node]: --- init view 4/6 @ (0.23, 6.10) ---
+[INFO] [1788131047.657133387] [voa_bb_node]: --- step 0 @ (0.23, 6.10) yaw 21 deg ---
+[INFO] [1788131047.657952060] [voa_bb_node]:   vision     1 detection(s)
+[INFO] [1788131047.659841849] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788131047.660688461] [voa_bb_node]:       couch             0.97   1.19m     1.42     6.33   0.110
+[INFO] [1788131047.672552108] [voa_bb_node]:     listening OPENED at t=1788131047.67 (scheduled 1788131043.69, late by +3.977s)
+[INFO] [1788131050.693368590] [voa_bb_node]:     listening CLOSED at t=1788131050.69, was open for 3.021s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131050.695615631] [voa_bb_node]:     DOA diag: 59 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 59 accepted, 0 read/reject failures
+[INFO] [1788131050.696491494] [voa_bb_node]:   [init view 4/6] audition 59 DOA samples
+[WARN] [1788131063.948512779] [voa_bb_node]: init_04: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131063.949462348] [voa_bb_node]: --- init view 5/6 @ (0.25, 6.07) ---
+[INFO] [1788131063.950253532] [voa_bb_node]: --- step 0 @ (0.25, 6.07) yaw 89 deg ---
+[INFO] [1788131063.951329930] [voa_bb_node]:   vision     no usable detections
+[INFO] [1788131063.955060004] [voa_bb_node]:     listening OPENED at t=1788131063.95 (scheduled 1788131060.20, late by +3.757s)
+[INFO] [1788131066.993621371] [voa_bb_node]:     listening CLOSED at t=1788131066.99, was open for 3.037s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131066.995758932] [voa_bb_node]:     DOA diag: 59 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 59 accepted, 0 read/reject failures
+[INFO] [1788131066.996703925] [voa_bb_node]:   [init view 5/6] audition 59 DOA samples
+[WARN] [1788131078.719838221] [voa_bb_node]: detector reported ['book', 'potted plant', 'tie', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131080.473714728] [voa_bb_node]: init_05: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131080.475212515] [voa_bb_node]: --- init view 6/6 @ (0.33, 6.06) ---
+[INFO] [1788131080.476495880] [voa_bb_node]: --- step 0 @ (0.33, 6.06) yaw 161 deg ---
+[INFO] [1788131080.477712325] [voa_bb_node]:   vision     4 detection(s)
+[INFO] [1788131080.478956390] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788131080.480204519] [voa_bb_node]:       tv                0.90   2.27m    -2.13     5.89   0.148
+[INFO] [1788131080.481480266] [voa_bb_node]:       person            0.50   2.11m    -2.03     5.68   0.120
+[INFO] [1788131080.482772720] [voa_bb_node]:       person            0.45   2.23m    -1.98     6.19   0.120
+[INFO] [1788131080.484427835] [voa_bb_node]:       person            0.44   2.20m    -2.04     5.93   0.120
+[INFO] [1788131080.490192046] [voa_bb_node]:     listening OPENED at t=1788131080.49 (scheduled 1788131076.62, late by +3.870s)
+[INFO] [1788131083.492235851] [voa_bb_node]:     listening CLOSED at t=1788131083.49, was open for 3.003s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131083.494440431] [voa_bb_node]:     DOA diag: 59 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 59 accepted, 0 read/reject failures
+[INFO] [1788131083.495275910] [voa_bb_node]:   [init view 6/6] audition 59 DOA samples
+[INFO] [1788131094.971228536] [voa_bb_node]: === INITIALIZATION complete (step 1, trigger 0.893); entering SEARCH ===
+[WARN] [1788131099.471869772] [voa_bb_node]: detector reported ['book', 'potted plant', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131101.217662729] [voa_bb_node]: scan_002_00: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131101.219457734] [voa_bb_node]:   scan view 1/6 @ (0.33, 6.06)
+[WARN] [1788131107.244073527] [voa_bb_node]: detector reported ['clock', 'laptop', 'sports ball'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131108.985915383] [voa_bb_node]: scan_002_01: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131108.987021420] [voa_bb_node]:   scan view 2/6 @ (0.34, 6.08)
+[WARN] [1788131115.221535759] [voa_bb_node]: detector reported ['bottle'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131116.967606481] [voa_bb_node]: scan_002_02: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131116.968516498] [voa_bb_node]:   scan view 3/6 @ (0.32, 6.10)
+[WARN] [1788131123.096219852] [voa_bb_node]: detector reported ['bottle'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131124.845013519] [voa_bb_node]: scan_002_03: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131124.846353310] [voa_bb_node]:   scan view 4/6 @ (0.28, 6.09)
+[WARN] [1788131130.981320582] [voa_bb_node]: vision: YOLO found 1 box(es) but NONE landed -- 0 had no valid depth, 0 beyond 10.0 m, 1 off-class
+[WARN] [1788131130.982729725] [voa_bb_node]: detector reported ['tie'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131132.735718728] [voa_bb_node]: scan_002_04: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131132.737220074] [voa_bb_node]:   scan view 5/6 @ (0.31, 6.13)
+[WARN] [1788131138.890000960] [voa_bb_node]: detector reported ['book', 'potted plant', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131140.641650473] [voa_bb_node]: scan_002_05: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131140.643422088] [voa_bb_node]:   scan view 6/6 @ (0.35, 6.13)
+[WARN] [1788131145.066981924] [voa_bb_node]: detector reported ['book', 'potted plant', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131146.818526548] [voa_bb_node]: yolo_002: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131146.820043096] [voa_bb_node]: --- step 2 @ (0.35, 6.10) yaw 146 deg ---
+[INFO] [1788131146.821776147] [voa_bb_node]:   vision     1 detection(s)
+[INFO] [1788131146.823122757] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788131146.824805019] [voa_bb_node]:       tv                0.88   2.04m    -2.09     6.14   0.148
+[INFO] [1788131146.830965685] [voa_bb_node]:     listening OPENED at t=1788131146.83 (scheduled 1788131142.91, late by +3.919s)
+[INFO] [1788131149.918675334] [voa_bb_node]:     listening CLOSED at t=1788131149.92, was open for 3.089s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131149.921188694] [voa_bb_node]:   audition   60 DOA samples over 3.0 s while stationary, bearing-only (no level)
+[INFO] [1788131149.922226919] [voa_bb_node]:     DOA diag: 60 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 60 accepted, 0 read/reject failures
+[INFO] [1788131156.291815022] [voa_bb_node]: step 2  det=1 (rej 0) doa=60 mq3=None  trigger 0.909 (stop at <= 0.7)
+[WARN] [1788131160.601066794] [voa_bb_node]: detector reported ['book', 'potted plant', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131169.201703604] [voa_bb_node]: detector reported ['bottle'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131174.737271836] [voa_bb_node]: detector reported ['bottle'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131176.484231822] [voa_bb_node]: scan_003_00: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131176.485638632] [voa_bb_node]:   scan view 1/6 @ (0.14, 5.43)
+[WARN] [1788131183.302721841] [voa_bb_node]: vision: YOLO found 3 box(es) but NONE landed -- 0 had no valid depth, 0 beyond 10.0 m, 2 off-class
+[WARN] [1788131183.303798664] [voa_bb_node]: detector reported ['bottle', 'dining table'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131185.047818170] [voa_bb_node]: scan_003_01: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131185.048832137] [voa_bb_node]:   scan view 2/6 @ (0.18, 5.44)
+[WARN] [1788131193.557827230] [voa_bb_node]: scan_003_02: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131193.561238263] [voa_bb_node]:   scan view 3/6 @ (0.18, 5.48)
+[WARN] [1788131200.357299478] [voa_bb_node]: vision: YOLO found 13 box(es) but NONE landed -- 0 had no valid depth, 0 beyond 10.0 m, 4 off-class
+[WARN] [1788131200.359706432] [voa_bb_node]: detector reported ['bed', 'book', 'potted plant', 'vase'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131202.100696561] [voa_bb_node]: scan_003_03: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131202.102259102] [voa_bb_node]:   scan view 4/6 @ (0.21, 5.49)
+[WARN] [1788131208.826876824] [voa_bb_node]: detector reported ['sports ball', 'tie'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131210.575886802] [voa_bb_node]: scan_003_04: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131210.576819737] [voa_bb_node]:   scan view 5/6 @ (0.26, 5.45)
+[WARN] [1788131217.490905377] [voa_bb_node]: detector reported ['bottle', 'dining table'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131219.243196315] [voa_bb_node]: scan_003_05: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131219.244111969] [voa_bb_node]:   scan view 6/6 @ (0.31, 5.45)
+[WARN] [1788131224.514890787] [voa_bb_node]: detector reported ['bottle', 'cup', 'dining table'] which are NOT in the object map classes ['person', 'chair', 'couch', 'toilet', 'microwave', 'oven', 'sink', 'refrigerator', 'tv'] -- these contribute nothing. Check yolo_path matches LAB_CLASSES.
+[WARN] [1788131226.263077395] [voa_bb_node]: yolo_003: only 1/3 frames were new (2 stale, skipped rather than double-counted) -- the camera may be publishing slower than PHOTO_INTERVAL_S
+[INFO] [1788131226.264025341] [voa_bb_node]: --- step 3 @ (0.30, 5.44) yaw -98 deg ---
+[INFO] [1788131226.264803955] [voa_bb_node]:   vision     2 detection(s)
+[INFO] [1788131226.265969653] [voa_bb_node]:       class             conf   depth    map x    map y     sim
+[INFO] [1788131226.266931297] [voa_bb_node]:       microwave         0.83   3.25m     0.12     2.19   0.245
+[INFO] [1788131226.267769854] [voa_bb_node]:       person            0.54   0.94m     0.61     4.45   0.120
+[INFO] [1788131226.272075358] [voa_bb_node]:     listening OPENED at t=1788131226.27 (scheduled 1788131221.52, late by +4.756s)
+[INFO] [1788131229.294851658] [voa_bb_node]:     listening CLOSED at t=1788131229.29, was open for 3.021s (intended 3.0s), doa_thread_alive=True
+[INFO] [1788131229.298665396] [voa_bb_node]:   audition   59 DOA samples over 3.0 s while stationary, bearing-only (no level)
+[INFO] [1788131229.300347247] [voa_bb_node]:     DOA diag: 59 ticks while listening -- 0 blocked by ego-velocity gate (lin=0.000 ang=0.000 vs limit 0.02), 59 accepted, 0 read/reject failures
+[INFO] [1788131236.965304799] [voa_bb_node]: step 3  det=2 (rej 0) doa=59 mq3=None  trigger 0.819 (stop at <= 0.7)
+[INFO] [1788131236.966733343] [voa_bb_node]: step limit; peak is person at (-2.00, 5.75); driving there and terminating
+[INFO] [1788131236.967878879] [voa_bb_node]:   approaching to within 0.50 m -> (-1.50, 5.75)
+[INFO] [1788131245.605415409] [voa_bb_node]: estimated source at map (-2.00, 5.75) -> /home/sunzid/workspaces/ssjet_ws/src/voa_maps/voa_maps/save/bb/voa_run_2026-08-30_180307/VA
+[INFO] [1788131245.606314038] [voa_bb_node]: run complete; shutting down
+[INFO] [1788131245.607183351] [voa_bb_node]: exiting cleanly

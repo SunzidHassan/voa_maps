@@ -98,8 +98,8 @@ from . import rosFunctions as rf
 #     check rather than being accumulated, so a stray 'bottle' cannot dilute
 #     the semantic map.
 # Set to None to take every class the loaded model reports instead.
-OBJECT_CLASSES = ['person', 'couch', 'toilet', 'microwave',
-                  'oven', 'sink', 'refrigerator', 'clock']
+OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+                  'oven', 'sink', 'refrigerator', 'tv']
 
 # --- topics / frames ---
 RGB_TOPIC = '/oak/rgb/image_raw/compressed'
@@ -280,9 +280,15 @@ MQ3_BASELINE = 150.0
 Q_S_HYPOTHESES = tuple(10.0 ** np.linspace(np.log10(5), np.log10(200), 7))
 
 # --- fusion / termination ---
-W_VISION, W_OLFACT, W_SOUND = 1.0, 0.1, 0.1
-ENTROPY_FRAC = 0.96
+W_VISION, W_OLFACT, W_SOUND = 1.0, 0.5, 0.5
+ENTROPY_FRAC = 0.7
 MAX_STEPS = 3
+# First step number used by the SEARCH phase (0 = pre-sensing, 1 = init).
+SEARCH_STEP_0 = 2
+# MAX_STEPS caps the step NUMBER, not a count of search iterations. With
+# SEARCH_STEP_0 = 2 and MAX_STEPS = 3 the run does search steps 2 and 3 and
+# stops -- the last row in trajectory_log.csv is step 3. Raising MAX_STEPS to
+# N therefore allows search steps 2..N, i.e. N - 1 of them.
 
 # --- initialization phase: 5 egocentric views before search ---
 # Mirrors initialize_envKnowledge in the AI2-THOR simulation, which rotates
@@ -328,6 +334,7 @@ class ReSpeaker:
     def __init__(self, dev):
         self.dev = dev
         self._lock = threading.Lock()
+        self.last_error = None
 
     def read(self, name):
         import usb.util
@@ -346,23 +353,80 @@ class ReSpeaker:
         return list(resp)
 
     def read_doa(self):
-        """(doa_degrees:int, is_speech:bool) or (None, False)."""
+        """(doa_degrees:int, is_speech:bool) or (None, False).
+
+        The exception is now RECORDED, not just swallowed -- self.last_error
+        holds the actual USB failure (permission denied, timeout, stall,
+        wrong offset...) so the caller can report WHY every read is failing
+        instead of only that it is.
+        """
         try:
             words = self.read("DOA_VALUE")
             if not words or len(words) < 2:
+                self.last_error = f"short/empty response: {words!r}"
                 return None, False
+            self.last_error = None
             return int(words[0]), bool(words[1])
-        except Exception:
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             return None, False
 
     @staticmethod
     def open():
+        """Find and open the XVF3800, or return None with a diagnosed reason.
+
+        The previous version caught every failure with one bare `except
+        Exception: return None` -- a missing pyusb install, a missing libusb
+        backend, a udev permissions problem, and "the array genuinely is not
+        plugged in" all produced the IDENTICAL silent None. That is why
+        run_meta showed requested_modalities=VA but modalities=V with no clue
+        why. Each case below is now distinguished and printed.
+        """
         try:
             import usb.core
-            dev = usb.core.find(idVendor=RESPEAKER_VID, idProduct=RESPEAKER_PID)
-            return ReSpeaker(dev) if dev is not None else None
-        except Exception:
+            import usb.util
+        except Exception as e:
+            print(f"[ReSpeaker] pyusb import failed ({type(e).__name__}: {e}). "
+                  f"Is pyusb installed in THIS venv? -> pip install pyusb")
             return None
+
+        try:
+            dev = usb.core.find(idVendor=RESPEAKER_VID, idProduct=RESPEAKER_PID)
+        except Exception as e:
+            # The single most common case here is usb.core.NoBackendError --
+            # pyusb imported fine but found no libusb shared library at all,
+            # which is a system package, not a pip package.
+            print(f"[ReSpeaker] usb.core.find() raised {type(e).__name__}: {e}  "
+                  f"(looking for VID {RESPEAKER_VID:#06x} PID {RESPEAKER_PID:#06x}). "
+                  f"If this says NoBackendError: sudo apt-get install libusb-1.0-0")
+            return None
+
+        if dev is None:
+            print(f"[ReSpeaker] pyusb + libusb both work, but no device answered "
+                  f"VID {RESPEAKER_VID:#06x} PID {RESPEAKER_PID:#06x}. "
+                  f"USB devices actually visible to this process:")
+            try:
+                seen = list(usb.core.find(find_all=True))
+                if not seen:
+                    print("    (NONE enumerated at all -- almost always a udev/"
+                          "permissions problem: this process cannot see ANY USB "
+                          "device, not just the ReSpeaker. Check udev rules, or "
+                          "whether this needs to run as root / in the right group.)")
+                else:
+                    for d in seen:
+                        flag = ("  <-- VID/PID MISMATCH: RESPEAKER_VID/RESPEAKER_PID "
+                                "may need updating to match this")
+                        match = (d.idVendor == RESPEAKER_VID)
+                        print(f"    VID {d.idVendor:#06x}  PID {d.idProduct:#06x}"
+                              f"{flag if match else ''}")
+            except Exception as e2:
+                print(f"    could not enumerate USB devices either "
+                      f"({type(e2).__name__}: {e2})")
+            return None
+
+        print(f"[ReSpeaker] OK -- found VID {dev.idVendor:#06x} "
+              f"PID {dev.idProduct:#06x} at bus {dev.bus} address {dev.address}")
+        return ReSpeaker(dev)
 
 
 class VAORobuddy(Node):
@@ -372,7 +436,7 @@ class VAORobuddy(Node):
 
         self.declare_parameter('goal_phrase', 'rotten food smell')
         self.declare_parameter('sound_phrase', 'an alarm clock ringing')
-        self.declare_parameter('yolo_path', 'voa_maps/models/YOLO/yolo26m.pt')
+        self.declare_parameter('yolo_path', 'models/YOLO/yolo26m.pt')
         self.declare_parameter('save_dir', '')
         self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
@@ -519,6 +583,14 @@ class VAORobuddy(Node):
         self.doa_lock = threading.Lock()
         self.doa_burst = []
         self.listening = False
+        # Per-listening-window diagnostic counters. Reset at the start of
+        # every LISTEN/INIT_LISTEN window, read and printed right after
+        # auditionBranch() runs -- this is what distinguishes "the ego-noise
+        # gate never opened" from "reads were attempted but every one failed"
+        # from "reads succeeded but were rejected downstream", which used to
+        # all look identical: zero samples, no clue why.
+        self.doa_diag = dict(attempts=0, vel_blocked=0, ok=0, fail=0)
+        self.doa_thread_alive = False  # set True once _doa_loop actually starts running
         self._level_lock = threading.Lock()
         self._level_db = None
         self._audio_stream = None
@@ -553,6 +625,17 @@ class VAORobuddy(Node):
         self.spin_deadline = 0.0
 
         self.state = 'WAIT_MAP'
+        # STEP NUMBERING
+        #   0        pre-sensing baseline: the priors, before any measurement.
+        #            Recording it makes the entropy column start at H_max, so a
+        #            run's whole trajectory is visible rather than starting
+        #            part-way down with nothing to compare against.
+        #   1        initialization: one summary row after the full 360 scan,
+        #            plus one detail row per view (identified by init_view).
+        #   2, 3...  search steps.
+        # SEARCH_STEP_0 is where search begins; MAX_STEPS still counts SEARCH
+        # steps only, so changing this scheme does not silently change run
+        # length.
         self.step = 0
         self.rows = []
         self.t0 = time.time()
@@ -661,6 +744,41 @@ class VAORobuddy(Node):
         with self._level_lock:
             return self._level_db
 
+    def _report_doa_diag(self):
+        """Print WHY this listening window got the sample count it got, then
+        reset the counters for the next window.
+
+        Three distinct failure shapes, previously indistinguishable from
+        "0 DOA samples" alone:
+          attempts == 0          the loop never even saw self.listening=True
+                                 during this window -- a timing/state bug,
+                                 not a hardware problem.
+          vel_blocked == attempts   every tick was blocked by the ego-noise
+                                 gate -- the robot never registered as
+                                 truly stationary (check /odom: real sensor
+                                 noise can sit persistently above
+                                 EGO_NOISE_VEL even when parked).
+          fail == attempts - vel_blocked   the gate opened and reads were
+                                 attempted, but every one failed at the USB
+                                 layer -- self.respeaker.last_error holds the
+                                 actual exception.
+        """
+        d = self.doa_diag
+        detail = ""
+        if d['fail'] > 0 and self.respeaker is not None and self.respeaker.last_error:
+            detail = f"  last USB error: {self.respeaker.last_error}"
+        self.get_logger().info(
+            f"    DOA diag: {d['attempts']} ticks while listening -- "
+            f"{d['vel_blocked']} blocked by ego-velocity gate "
+            f"(lin={self.lin_vel:.3f} ang={self.ang_vel:.3f} vs limit "
+            f"{EGO_NOISE_VEL}), {d['ok']} accepted, {d['fail']} read/reject "
+            f"failures{detail}")
+        if d['attempts'] == 0:
+            self.get_logger().warn(
+                "    self.listening was never True during this window -- "
+                "state-machine timing issue, not a hardware problem")
+        self.doa_diag = dict(attempts=0, vel_blocked=0, ok=0, fail=0)
+
     # ---------------------------------------------------------------- DOA thread
     def _doa_loop(self):
         """Poll the XVF3800 over USB and collect samples only while stationary.
@@ -670,18 +788,44 @@ class VAORobuddy(Node):
         settle window and anything nav2 issues unexpectedly.
         """
         period = 1.0 / DOA_POLL_HZ
-        while not self._stop_evt.is_set():
-            if self.listening and self.lin_vel <= EGO_NOISE_VEL \
-                    and self.ang_vel <= EGO_NOISE_VEL:
-                angle, is_speech = self.respeaker.read_doa()
-                if angle is not None and (is_speech or not DOA_REQUIRE_SPEECH):
-                    # Pair each bearing with the level measured at the same
-                    # moment. rosFunctions.auditionBranch accepts either a bare
-                    # angle or an (angle, level) tuple.
-                    lvl = self._current_level_db() if self.has_sound_level else None
-                    with self.doa_lock:
-                        self.doa_burst.append((float(angle), lvl))
-            time.sleep(period)
+        # attempts==0 with the loop apparently running was previously
+        # unfalsifiable: an uncaught exception ANYWHERE in this body kills a
+        # daemon thread silently (Python prints a traceback to stderr, which
+        # is easy to miss under ROS's own logging, and the node keeps running
+        # otherwise -- from the outside it looks identical to "self.listening
+        # was just never True"). Wrapping the whole body converts that into a
+        # loud, timestamped, un-missable log line instead, and self.doa_thread_alive
+        # lets _report_doa_diag say definitively whether the thread is still
+        # running at all.
+        self.doa_thread_alive = True
+        try:
+            while not self._stop_evt.is_set():
+                if self.listening:
+                    self.doa_diag['attempts'] += 1
+                    if self.lin_vel <= EGO_NOISE_VEL and self.ang_vel <= EGO_NOISE_VEL:
+                        angle, is_speech = self.respeaker.read_doa()
+                        accepted = angle is not None and (is_speech or not DOA_REQUIRE_SPEECH)
+                        if accepted:
+                            # Pair each bearing with the level measured at the
+                            # same moment. rosFunctions.auditionBranch accepts
+                            # either a bare angle or an (angle, level) tuple.
+                            lvl = self._current_level_db() if self.has_sound_level else None
+                            with self.doa_lock:
+                                self.doa_burst.append((float(angle), lvl))
+                            self.doa_diag['ok'] += 1
+                        else:
+                            self.doa_diag['fail'] += 1
+                    else:
+                        self.doa_diag['vel_blocked'] += 1
+                time.sleep(period)
+        except Exception:
+            import traceback
+            self.doa_thread_alive = False
+            print(f"[_doa_loop] CRASHED and is no longer polling DOA at all "
+                  f"(t={time.time():.1f}). Full traceback:")
+            traceback.print_exc()
+        finally:
+            self.doa_thread_alive = False
 
     # ---------------------------------------------------------------- pose
     def update_pose(self, stamp=None):
@@ -788,6 +932,9 @@ class VAORobuddy(Node):
                                        throttle_duration_sec=5.0)
                 return
             self.grid_ready = True
+            # Baseline row BEFORE any sensing: every branch is still its
+            # uniform prior, so this records H_max and trigger = 1.0.
+            self.log_prestep()
             self.get_logger().info(
                 f"grid {self.free_mask.shape[0]}x{self.free_mask.shape[1]} "
                 f"({self.free_mask.size} cells, {int(self.free_mask.sum())} free), "
@@ -856,7 +1003,6 @@ class VAORobuddy(Node):
                 self.halt()
                 self.listening = False
                 self.listen_from = now + SETTLE_S
-                self.phase_until = now + SETTLE_S + LISTEN_S
                 self.state = 'INIT_LISTEN'
                 return
 
@@ -865,14 +1011,39 @@ class VAORobuddy(Node):
             return
 
         if self.state == 'INIT_LISTEN':
-            if now >= self.listen_from:
+            if now >= self.listen_from and not self.listening:
                 self.listening = True
+                self._listen_opened_at = now
+                # phase_until is anchored to NOW, not to a deadline computed
+                # back in the SENSE state. That earlier version pre-computed
+                # both listen_from and phase_until together, so if
+                # control_callback was delayed getting back to this state by
+                # more than SETTLE_S + LISTEN_S, a single late call could see
+                # now already past BOTH deadlines: listening flipped True
+                # then immediately back False within one Python statement,
+                # a window open for microseconds that the 20 Hz background
+                # poller essentially never observes -- self.doa_diag showing
+                # exactly 0 attempts with the thread otherwise healthy. Every
+                # window is now a full LISTEN_S seconds from whenever it
+                # ACTUALLY opens, however late that was.
+                self.phase_until = now + LISTEN_S
+                self.get_logger().info(
+                    f"    listening OPENED at t={now:.2f} "
+                    f"(scheduled {self.listen_from:.2f}, late by "
+                    f"{now - self.listen_from:+.3f}s)")
             if now < self.phase_until:
                 self.halt()
                 return
+            if self.listening:
+                self.get_logger().info(
+                    f"    listening CLOSED at t={now:.2f}, was open for "
+                    f"{now - getattr(self, '_listen_opened_at', now):.3f}s "
+                    f"(intended {LISTEN_S:.1f}s), doa_thread_alive="
+                    f"{getattr(self, 'doa_thread_alive', '?')}")
             self.listening = False
             n = rf.auditionBranch(self)
             self._pending['n_doa'] = n
+            self._report_doa_diag()
             self.get_logger().info(
                 f"  [init view {self.init_index + 1}/{INIT_HEADINGS}] audition "
                 f"{n} DOA samples")
@@ -883,9 +1054,21 @@ class VAORobuddy(Node):
         if self.state == 'INIT_NEXT':
             self.init_index += 1
             if self.init_index >= INIT_HEADINGS:
+                # Fuse what the whole scan gathered and record it as step 1,
+                # so the initialization has one comparable entropy value
+                # rather than only per-view detail rows.
+                self.step = 1
+                trig = rf.update_belief(self)
+                summary = dict(self._pending)
+                summary.pop('dets', None)
+                summary.setdefault('n_det', 0); summary.setdefault('n_rej', 0)
+                summary.setdefault('n_doa', 0); summary.setdefault('counts', None)
+                self.log_step(summary, trig)
                 self.get_logger().info(
-                    "=== INITIALIZATION complete; entering SEARCH ===")
+                    f"=== INITIALIZATION complete (step 1, trigger {trig:.3f}); "
+                    f"entering SEARCH ===")
                 self.phase = 'search'
+                self.step = SEARCH_STEP_0
                 self.state = 'SENSE'
                 return
             if self.send_spin(INIT_SPIN_RAD):
@@ -985,18 +1168,31 @@ class VAORobuddy(Node):
                 self.halt()
                 self.listening = False       # stays shut until spin-down
                 self.listen_from = now + SETTLE_S
-                self.phase_until = now + SETTLE_S + LISTEN_S
                 self.state = 'LISTEN'
             else:
                 self.state = 'FUSE'
             return
 
         if self.state == 'LISTEN':
-            if now >= self.listen_from:
+            if now >= self.listen_from and not self.listening:
                 self.listening = True
+                self._listen_opened_at = now
+                # See INIT_LISTEN for why this is anchored to NOW rather than
+                # a deadline computed back in SENSE.
+                self.phase_until = now + LISTEN_S
+                self.get_logger().info(
+                    f"    listening OPENED at t={now:.2f} "
+                    f"(scheduled {self.listen_from:.2f}, late by "
+                    f"{now - self.listen_from:+.3f}s)")
             if now < self.phase_until:
                 self.halt()
                 return
+            if self.listening:
+                self.get_logger().info(
+                    f"    listening CLOSED at t={now:.2f}, was open for "
+                    f"{now - getattr(self, '_listen_opened_at', now):.3f}s "
+                    f"(intended {LISTEN_S:.1f}s), doa_thread_alive="
+                    f"{getattr(self, 'doa_thread_alive', '?')}")
             self.listening = False
             n = rf.auditionBranch(self)
             self._pending['n_doa'] = n
@@ -1005,6 +1201,7 @@ class VAORobuddy(Node):
                 f"  audition   {n} DOA samples over {LISTEN_S:.1f} s while stationary"
                 + (f", level {lvl:.1f} dB" if lvl is not None else
                    ", bearing-only (no level)"))
+            self._report_doa_diag()
             if self.sndHyp is not None and self.sndHyp.at_endpoint():
                 self.get_logger().warn(
                     "L0 posterior pegged at a grid edge -- either the level scale "
@@ -1194,12 +1391,46 @@ class VAORobuddy(Node):
                 f"{d['depth']:>7.2f}m{d['x']:>9.2f}{d['y']:>9.2f}{d['sim']:>8.3f}")
 
     # ---------------------------------------------------------------- output
+    def log_prestep(self):
+        """Step 0: the priors, recorded before any measurement is taken.
+
+        Every belief map is still uniform over free space at this point, so
+        H_fused is H_max and trigger is exactly 1.0 by construction. Writing
+        it makes the entropy column in trajectory_log.csv start from the
+        theoretical maximum, which is what makes "how far did this run
+        actually get" answerable -- without it the first logged value is
+        already post-initialization and there is nothing to measure the drop
+        against.
+
+        No sensor fields are filled in: nothing has been sensed yet, and
+        putting zeros here would be indistinguishable from a real reading of
+        zero.
+        """
+        uni = self.free_mask.astype(float)
+        uni /= uni.sum()
+        self.p_vis = self.p_olf = self.p_snd = self.p_fused = uni
+        self.rows.append(dict(
+            step=0, phase='pre_sensing', time=round(time.time() - self.t0, 2),
+            robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
+            n_detections=0, n_depth_rejected=0,
+            n_doa_samples=0,
+            chemicalConc=None,
+            H_fused=round(rf.map_entropy(uni), 3),
+            trigger=1.0,
+            peak_object='unobserved',
+            q_s_map=None,
+            L0_map=None,
+        ))
+        self.get_logger().info(
+            f"step 0 (pre-sensing): H_max {rf.map_entropy(uni):.2f} bits over "
+            f"{int(self.free_mask.sum())} free cells, trigger 1.000")
+
     def log_init_view(self, p):
         """One row per orthogonal init view -- no trigger/entropy yet, since
         the belief has not been fused at this point."""
         yaw = rf.quaternion_to_yaw(0, 0, self.robot_map_angZ, self.robot_map_angW)
         self.rows.append(dict(
-            step=-1, phase='Initialization', init_view=self.init_index,
+            step=1, phase='Initialization', init_view=self.init_index,
             time=round(time.time() - self.t0, 2),
             robot_x=self.robot_map_posX, robot_y=self.robot_map_posY,
             robot_yaw=round(math.degrees(yaw), 1),
@@ -1263,6 +1494,7 @@ class VAORobuddy(Node):
                     modalities=self.modalities,
                     requested_modalities=self.requested_modalities,
                     steps=self.step + 1,
+                    search_steps=max(0, self.step - SEARCH_STEP_0 + 1),
                     entropy_frac=self.entropy_frac,
                     estimated_source=dict(x=tx, y=tz),
                     peak_object=rf.peak_object_name(self),
