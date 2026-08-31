@@ -576,7 +576,7 @@ def sound_belief_map(log_belief, observations=None, range_mode=RANGE_MODE,
 
 def _load_clap():
     """Lazily load laion_clap. Returns None when unavailable."""
-    global _CLAP_MODEL
+    global _CLAP_MODEL, _CLAP_ACTIVE
     if _CLAP_MODEL is not None:
         return _CLAP_MODEL
     if not CLAP_ENABLED:
@@ -586,9 +586,11 @@ def _load_clap():
         m = laion_clap.CLAP_Module(enable_fusion=False)
         m.load_ckpt(CLAP_CKPT)
         _CLAP_MODEL = m
+        _CLAP_ACTIVE = True
         print("[sound] CLAP loaded.")
     except Exception as e:
         print(f"[sound] CLAP unavailable ({e}); falling back to SBERT text matching.")
+        _CLAP_ACTIVE = False
         _CLAP_MODEL = None
     return _CLAP_MODEL
 
@@ -597,6 +599,21 @@ def _cos(a, b):
     a = a / (np.linalg.norm(a, axis=-1, keepdims=True) + 1e-12)
     b = b / (np.linalg.norm(b, axis=-1, keepdims=True) + 1e-12)
     return a @ b.T
+
+
+_CLAP_ACTIVE = None   # None = not yet determined, True/False once _load_clap() has run
+
+
+def clap_is_active():
+    """True if CLAP loaded successfully, False if running on the SBERT-text
+    fallback, None if audition has not attempted a similarity lookup yet.
+
+    Existed before only as a print() statement -- unrecoverable once it
+    scrolled past in the console. This is what lets the difference between
+    "the model actually heard the TV" and "it silently compared class names
+    to a text description" be logged and inspected after the fact.
+    """
+    return _CLAP_ACTIVE
 
 
 def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM):

@@ -84,6 +84,7 @@ from tf2_ros.transform_listener import TransformListener
 from ultralytics import YOLO
 
 from .voa_functions import visionFunction as vf
+from .voa_functions import soundFunctions as sf
 from . import rosFunctions as rf
 
 # ============================================================= CONFIG
@@ -98,8 +99,8 @@ from . import rosFunctions as rf
 #     check rather than being accumulated, so a stray 'bottle' cannot dilute
 #     the semantic map.
 # Set to None to take every class the loaded model reports instead.
-OBJECT_CLASSES = ['chair', 'couch', 'toilet', 'microwave',
-                  'oven', 'sink', 'refrigerator', 'tv']
+OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+                  'oven', 'sink', 'refrigerator', 'clock']
 
 # --- topics / frames ---
 RGB_TOPIC = '/oak/rgb/image_raw/compressed'
@@ -298,11 +299,16 @@ SEARCH_STEP_0 = 2
 # see, and it gives olfaction (and audition, if fitted) an initial reading
 # from every direction rather than just the one the robot happened to be
 # facing at startup.
+# DEFAULT only -- the actual per-run values are the 'init_headings' and
+# 'search_headings' ROS parameters (self.init_headings / self.search_headings
+# / self.init_spin_rad / self.search_spin_rad), independently configurable so
+# initialization and each search step's rotation do not have to match.
+#
 # 6 headings x 60 deg. With a 69 deg HFOV that overlaps by 9 deg; 4 x 90 deg
 # would leave a 21 deg blind wedge between consecutive views, wide enough to
 # hide an object entirely at range.
 INIT_HEADINGS = 6
-INIT_SPIN_RAD = 2.0 * math.pi / INIT_HEADINGS   # closed-loop via nav2's Spin
+SEARCH_HEADINGS = 1
 SPIN_TIMEOUT_S = 15.0
 
 # Frames captured at each heading AFTER the base has stopped. Several frames
@@ -440,11 +446,22 @@ class VAORobuddy(Node):
         self.declare_parameter('save_dir', '')
         self.declare_parameter('modalities', DEFAULT_MODALITIES)
         self.declare_parameter('entropy_frac', ENTROPY_FRAC)
+        self.declare_parameter('init_headings', INIT_HEADINGS)
+        self.declare_parameter('search_headings', SEARCH_HEADINGS)
         gp = lambda n: self.get_parameter(n).value
 
         self.goal_phrase = f"Is emitting {gp('goal_phrase')} odor:"
         self.sound_phrase = gp('sound_phrase')
         self.entropy_frac = float(gp('entropy_frac'))
+        # Independently configurable: how many orthogonal views the 360 deg
+        # scan takes during INITIALIZATION vs during each SEARCH step. These
+        # used to share one hardcoded constant (INIT_HEADINGS), so they could
+        # only ever be the same number and could only be changed by editing
+        # the file.
+        self.init_headings = max(1, int(gp('init_headings')))
+        self.search_headings = max(1, int(gp('search_headings')))
+        self.init_spin_rad = 2.0 * math.pi / self.init_headings
+        self.search_spin_rad = 2.0 * math.pi / self.search_headings
         # Which senses this run actually processes -- same convention as the
         # AI2-THOR simulation's ablation strings ('VAO', 'VA', 'VO', ...).
         # Hardware availability can still veto A even if requested (see the
@@ -970,7 +987,7 @@ class VAORobuddy(Node):
             self.init_index = 0
             self.phase = 'Initialization'
             self.get_logger().info(
-                f"=== INITIALIZATION: {INIT_HEADINGS} orthogonal views ===")
+                f"=== INITIALIZATION: {self.init_headings} orthogonal views ===")
             self.state = 'INIT_SENSE'
             return
 
@@ -993,7 +1010,7 @@ class VAORobuddy(Node):
                 dets, n_rej = self.capture_views(f"init_{self.init_index:02d}")
             counts = rf.olfactionBranch(self) if self.use_O else None
             self.get_logger().info(
-                f"--- init view {self.init_index + 1}/{INIT_HEADINGS} @ "
+                f"--- init view {self.init_index + 1}/{self.init_headings} @ "
                 f"({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f}) ---")
             self.report_sensing(dets, n_rej, counts)
             self._pending = dict(n_det=len(dets), n_rej=n_rej, counts=counts, n_doa=0,
@@ -1045,7 +1062,7 @@ class VAORobuddy(Node):
             self._pending['n_doa'] = n
             self._report_doa_diag()
             self.get_logger().info(
-                f"  [init view {self.init_index + 1}/{INIT_HEADINGS}] audition "
+                f"  [init view {self.init_index + 1}/{self.init_headings}] audition "
                 f"{n} DOA samples")
             self.log_init_view(self._pending)
             self.state = 'INIT_NEXT'
@@ -1053,7 +1070,7 @@ class VAORobuddy(Node):
 
         if self.state == 'INIT_NEXT':
             self.init_index += 1
-            if self.init_index >= INIT_HEADINGS:
+            if self.init_index >= self.init_headings:
                 # Fuse what the whole scan gathered and record it as step 1,
                 # so the initialization has one comparable entropy value
                 # rather than only per-view detail rows.
@@ -1071,7 +1088,7 @@ class VAORobuddy(Node):
                 self.step = SEARCH_STEP_0
                 self.state = 'SENSE'
                 return
-            if self.send_spin(INIT_SPIN_RAD):
+            if self.send_spin(self.init_spin_rad):
                 self.state = 'INIT_ROTATE'
             else:
                 # No spin server: proceed without turning rather than crash.
@@ -1105,19 +1122,57 @@ class VAORobuddy(Node):
                 return
             self.capture_views(f"scan_{self.step:03d}_{self.scan_index:02d}")
             self.get_logger().info(
-                f"  scan view {self.scan_index + 1}/{INIT_HEADINGS} "
+                f"  scan view {self.scan_index + 1}/{self.search_headings} "
                 f"@ ({self.robot_map_posX:.2f}, {self.robot_map_posY:.2f})")
+            # Listen at THIS stop too, mirroring INIT_SENSE -> INIT_LISTEN.
+            # Previously audition only ran once per search STEP, in a
+            # separate LISTEN state after the whole rotation finished -- the
+            # 6 (or N) intermediate headings captured vision but never
+            # recorded any audio at all, so most of the rotation was
+            # acoustically silent from CLAP's point of view.
+            if self.use_A:
+                self.listening = False
+                self.listen_from = now + SETTLE_S
+                self.state = 'SEARCH_SCAN_LISTEN'
+                return
+            self.state = 'SEARCH_SCAN_NEXT'
+            return
+
+        if self.state == 'SEARCH_SCAN_LISTEN':
+            if now >= self.listen_from and not self.listening:
+                self.listening = True
+                self._listen_opened_at = now
+                self.phase_until = now + LISTEN_S
+                self.get_logger().info(
+                    f"    listening OPENED at t={now:.2f} "
+                    f"(scheduled {self.listen_from:.2f}, late by "
+                    f"{now - self.listen_from:+.3f}s)")
+            if now < self.phase_until:
+                self.halt()
+                return
+            if self.listening:
+                self.get_logger().info(
+                    f"    listening CLOSED at t={now:.2f}, was open for "
+                    f"{now - getattr(self, '_listen_opened_at', now):.3f}s "
+                    f"(intended {LISTEN_S:.1f}s), doa_thread_alive="
+                    f"{getattr(self, 'doa_thread_alive', '?')}")
+            self.listening = False
+            n = rf.auditionBranch(self)
+            self._report_doa_diag()
+            self.get_logger().info(
+                f"  [scan view {self.scan_index + 1}/{self.search_headings}] "
+                f"audition {n} DOA samples")
             self.state = 'SEARCH_SCAN_NEXT'
             return
 
         if self.state == 'SEARCH_SCAN_NEXT':
             self.scan_index += 1
-            if self.scan_index >= INIT_HEADINGS:
+            if self.scan_index >= self.search_headings:
                 # Rotation done -- fall through to the normal sensing step,
                 # which will not re-enter the scan because scan_done is set.
                 self.state = 'SENSE'
                 return
-            if self.send_spin(INIT_SPIN_RAD):
+            if self.send_spin(self.search_spin_rad):
                 self.state = 'SEARCH_SCAN_ROTATE'
             else:
                 self.get_logger().warn(
@@ -1501,7 +1556,16 @@ class VAORobuddy(Node):
                     mq3_baseline=self.mq3_baseline,
                     depth_rejected=self.n_depth_rejected,
                     goal_phrase=self.goal_phrase,
+                    sound_phrase=self.sound_phrase,
                     final_phase=self.phase,
+                    # What ACTUALLY drove the visual belief on the last step,
+                    # and whether audition ever produced a real similarity
+                    # array vs silently falling back to text matching against
+                    # sound_phrase. Without this, an exactly-uniform
+                    # L0_posterior is the only clue that audition never fired
+                    # at all -- this makes it explicit.
+                    vis_phrase_source=getattr(self, 'vis_phrase_source', None),
+                    clap_active=sf.clap_is_active(),
                     doa_offset_deg=DOA_OFFSET_DEG, doa_ccw=DOA_CCW)
         if self.olfHyp is not None:
             meta['q_s_map'] = float(np.exp(self.olfHyp.map_value()))

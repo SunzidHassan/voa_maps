@@ -247,12 +247,17 @@ def visionBranch(model, node, confThr=0.3):
     results = model(node.latest_rgb_image, verbose=False, conf=confThr)
     annotated = results[0].plot()
 
-    # Per-class similarity against the goal phrase. Cached inside
-    # class_goal_similarity, so this costs one SBERT encode for the whole run.
+    # Per-class similarity against WHATEVER actually drives the visual map
+    # for this run's modality (see resolve_vision_phrase) -- not always
+    # node.goal_phrase. In a VA run this is the sound-derived similarity or
+    # the sound_phrase text fallback, never the (irrelevant) odor phrase.
     sim_vec = None
     try:
-        if getattr(node, 'goal_phrase', None):
-            sim_vec = vf.class_goal_similarity(node.goal_phrase)
+        gp, ss, _source = resolve_vision_phrase(node)
+        if gp:
+            sim_vec = vf.class_goal_similarity(gp)
+        elif ss is not None:
+            sim_vec = ss
     except Exception as e:
         node.get_logger().warn(f"similarity lookup failed: {e}")
 
@@ -524,27 +529,57 @@ def mask_normalise(node, p):
     return q / s if s > 1e-12 else node.free_mask / node.free_mask.sum()
 
 
+def resolve_vision_phrase(node):
+    """Which text/audio signal actually drives the visual semantic map.
+
+    ONE place this is decided. Previously visionBranch() and save_cell_csv()
+    each unconditionally used node.goal_phrase for their own similarity
+    numbers, regardless of modality -- so in a VA (sound-only, no olfaction)
+    run, the "sim"/"best_sim"/"vis_like" numbers being LOGGED were SBERT
+    similarity to the ODOUR phrase, which never influenced the actual fused
+    belief at all. That made every VA-run diagnostic a red herring: the
+    number a person would naturally read to explain the result was not the
+    number that produced it.
+
+    Returns (goal_phrase_or_None, sound_sim_or_None, source) where source is
+    one of:
+      'odor'                normal VO/VAO case: comparing class names
+                             against the odor goal_phrase via SBERT.
+      'sound_similarity'     use_A and a real per-class array exists (from
+                             auditionBranch -> class_sound_similarity). Note
+                             this can ITSELF be CLAP-audio or an SBERT-text
+                             fallback inside that function -- check
+                             sf.clap_is_active() to tell those apart.
+      'sound_text_fallback'  use_A is on but no sound has been heard yet
+                             (auditionBranch never got a non-empty DOA burst,
+                             so sound_sim was never computed) -- falls back to
+                             comparing class names against node.sound_phrase
+                             as plain SBERT text. This is NOT audio analysis;
+                             it is text matching against whatever sound_phrase
+                             happens to be set to, which is easy to leave at
+                             its default and forget.
+      'none'                 no modality supplies a phrase at all.
+    """
+    gp = node.goal_phrase if node.use_O else None
+    ss = node.sound_sim if (node.use_A and getattr(node, 'sound_sim', None) is not None) else None
+    if gp is not None:
+        return gp, ss, 'odor'
+    if ss is not None:
+        return None, ss, 'sound_similarity'
+    if node.use_A:
+        fallback = getattr(node, 'sound_phrase', None) or node.goal_phrase
+        return fallback, None, 'sound_text_fallback'
+    return None, None, 'none'
+
+
 def update_belief(node):
     """Refresh every per-modality map and the log-space fusion.
 
     Returns the normalised fused entropy, which is the termination statistic.
     """
     if node.use_V:
-        gp = node.goal_phrase if node.use_O else None
-        ss = node.sound_sim if node.use_A else None
-        if gp is None and ss is None:
-            # VA mode before the first sound has been heard: olfaction is off
-            # so there is no odour phrase, and CLAP has not produced a sound
-            # similarity vector yet (it only runs after the first successful
-            # DOA burst, and falls back to SBERT if laion_clap is missing).
-            # With both absent, combine_similarity has nothing to work with
-            # and raises -- which crashed the very first search step.
-            #
-            # Fall back to the sound phrase as plain TEXT. It describes the
-            # same target CLAP would have embedded, so vision still has a
-            # semantic goal to project the object map onto instead of the run
-            # dying before it starts.
-            gp = getattr(node, 'sound_phrase', None) or node.goal_phrase
+        gp, ss, source = resolve_vision_phrase(node)
+        node.vis_phrase_source = source   # logged in run_meta.json / cell CSVs
         node.p_vis = mask_normalise(node, vf.visual_likelihood_multimodal(
             node.objectMap, goal_phrase=gp, sound_sim=ss))
     if node.use_O and node.olfHyp is not None:
@@ -1116,25 +1151,49 @@ def save_cell_csv(node, step, prefix='cells', top_n=None):
         add('fused', node.p_fused)
 
         if post is not None:
-            # The unnormalised semantic likelihood, i.e. what the class
-            # posterior and the goal similarity actually produce for this cell
-            # BEFORE normalisation rescales everything.
+            # The unnormalised semantic likelihood -- what the class
+            # posterior and the ACTIVE similarity signal actually produce for
+            # this cell BEFORE normalisation rescales everything. Uses
+            # resolve_vision_phrase() so this matches whatever really drove
+            # p_vis for this run/step, not always the odor phrase.
+            sim = None
             try:
-                sim = vf.class_goal_similarity(node.goal_phrase) \
-                    if getattr(node, 'goal_phrase', None) else None
+                gp, ss, source = resolve_vision_phrase(node)
+                rows_meta_source = source   # also written per-row below
+                if gp:
+                    sim = vf.class_goal_similarity(gp)
+                elif ss is not None:
+                    sim = ss
                 if sim is not None:
                     add('vis_like', np.tensordot(post, sim, axes=([2], [0])))
             except Exception:
-                pass
+                rows_meta_source = 'error'
             rows['observed'] = observed.ravel()[sel]
             mle = np.argmax(post, axis=2).ravel()[sel]
             rows['mle_class'] = [vf.CLASSES[k] if k < len(vf.CLASSES) else '?'
                                  for k in mle]
+            # vis_phrase_source is the SAME for every row (it is a per-step,
+            # not per-cell, fact) -- included per-row anyway so the CSV is
+            # self-describing without needing run_meta.json open alongside it.
+            rows['vis_phrase_source'] = rows_meta_source
+
             for i, cname in enumerate(vf.CLASSES):
                 safe = cname.replace(' ', '_')
                 rows[f'ev_{safe}'] = np.maximum(
                     beta[:, :, i] - prior_per_class[i], 0.0).ravel()[sel]
                 rows[f'post_{safe}'] = post[:, :, i].ravel()[sel]
+                # THE ANSWER to "how much similarity did each object have to
+                # the sound waveform": sim[i] is per-class, identical for
+                # every cell (it is not spatial), so it is broadcast here
+                # rather than looked up per row. Only written when a real
+                # per-class array was actually used (sim is not None) -- for
+                # an 'odor' source this is SBERT text similarity, for
+                # 'sound_similarity' it is the CLAP (or SBERT-fallback,
+                # check sf.clap_is_active()) audio-vs-class-name score, for
+                # 'sound_text_fallback' it is SBERT text similarity to
+                # node.sound_phrase, NOT audio analysis at all.
+                if sim is not None:
+                    rows[f'sim_{safe}'] = float(sim[i])
 
         df = pd.DataFrame(rows)
         if 'fused' in df:
