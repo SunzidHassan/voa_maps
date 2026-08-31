@@ -99,7 +99,7 @@ from . import rosFunctions as rf
 #     check rather than being accumulated, so a stray 'bottle' cannot dilute
 #     the semantic map.
 # Set to None to take every class the loaded model reports instead.
-OBJECT_CLASSES = ['person', 'chair', 'couch', 'toilet', 'microwave',
+OBJECT_CLASSES = ['tv', 'chair', 'couch', 'toilet', 'microwave',
                   'oven', 'sink', 'refrigerator', 'clock']
 
 # --- topics / frames ---
@@ -213,6 +213,11 @@ AUDIO_CHANNELS = 2          # channels to open on the capture stream
 # cleaner alternative -- it is a different processed signal, not a raw one.
 AUDIO_LEVEL_CHANNEL = 0
 AUDIO_BLOCK = 1600          # samples per RMS block (100 ms at 16 kHz)
+# Cap on buffered blocks for the CLAP mic clip (get_mic_clip), independent of
+# AUDIO_BLOCK's RMS bookkeeping. At 100 ms/block this is 100s of audio -- far
+# more than any real LISTEN_S window -- so it only ever bites if 'listening'
+# gets stuck True, not during normal ~3s windows.
+MIC_BUFFER_MAX_BLOCKS = 1000
 LEVEL_REF_RMS = 1.0         # arbitrary: only level DIFFERENCES are identifiable
 
 # --- sensor noise, already inflated ---
@@ -614,6 +619,16 @@ class VAORobuddy(Node):
         self._stop_evt = threading.Event()
         self._doa_thread = None
 
+        # Raw mic PCM captured while self.listening is True -- same window as
+        # doa_burst, so a CLAP audio embedding of what was actually heard can
+        # be produced alongside the DOA bearing burst, instead of only ever
+        # comparing class names against the fixed sound_phrase text. Drained
+        # (not just read) by get_mic_clip(), mirroring how auditionBranch
+        # drains doa_burst.
+        self._mic_lock = threading.Lock()
+        self._mic_buffer = []
+        self.audio_sample_rate = AUDIO_SAMPLE_RATE
+
         # --- belief state ---
         self.grid_ready = False
         self.x_points = self.z_points = None
@@ -746,20 +761,52 @@ class VAORobuddy(Node):
         actually carry the range information.
         """
         try:
-            x = np.asarray(indata, dtype=np.float64)
-            if x.ndim > 1:
-                ch = min(AUDIO_LEVEL_CHANNEL, x.shape[1] - 1)
-                x = x[:, ch]
+            raw = np.asarray(indata)
+            if raw.ndim > 1:
+                ch = min(AUDIO_LEVEL_CHANNEL, raw.shape[1] - 1)
+                raw = raw[:, ch]
+            x = raw.astype(np.float64)
             rms = float(np.sqrt(np.mean(x * x)))
             if rms > 0.0:
                 with self._level_lock:
                     self._level_db = 20.0 * math.log10(rms / LEVEL_REF_RMS)
+
+            # Buffer the same channel's raw int16 samples, but only during an
+            # active listening window -- self.listening is the same flag the
+            # DOA loop gates on, so the mic clip and the DOA burst always
+            # cover the same stretch of time. Outside a listening window this
+            # is a no-op, so idle time between windows costs nothing.
+            if self.listening:
+                block = raw if raw.dtype == np.int16 else raw.astype(np.int16)
+                with self._mic_lock:
+                    self._mic_buffer.append(block.copy())
+                    # Belt-and-braces cap: if 'listening' were ever stuck True
+                    # (a state-machine bug rather than a real window), this
+                    # keeps memory bounded instead of growing without limit.
+                    if len(self._mic_buffer) > MIC_BUFFER_MAX_BLOCKS:
+                        del self._mic_buffer[:-MIC_BUFFER_MAX_BLOCKS]
         except Exception:
             pass
 
     def _current_level_db(self):
         with self._level_lock:
             return self._level_db
+
+    def get_mic_clip(self):
+        """Return (and clear) the raw mic samples captured since the last
+        call, i.e. everything buffered during the listening window that just
+        closed. None if nothing was captured (audio stream not open, or the
+        window closed before any block arrived).
+
+        Called from auditionBranch() right after the DOA burst is drained, so
+        the two always describe the same window.
+        """
+        with self._mic_lock:
+            if not self._mic_buffer:
+                return None
+            clip = np.concatenate(self._mic_buffer)
+            self._mic_buffer = []
+        return clip
 
     def _report_doa_diag(self):
         """Print WHY this listening window got the sample count it got, then

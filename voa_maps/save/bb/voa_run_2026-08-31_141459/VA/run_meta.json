@@ -1,0 +1,33 @@
+{
+  "platform": "robuddy",
+  "ros_distro": "humble",
+  "modalities": "VA",
+  "requested_modalities": "VA",
+  "steps": 4,
+  "search_steps": 2,
+  "entropy_frac": 0.7,
+  "estimated_source": {
+    "x": 0.0,
+    "y": 6.75
+  },
+  "peak_object": "empty floor",
+  "mq3_baseline": 150.0,
+  "depth_rejected": 0,
+  "goal_phrase": "Is emitting rotten food smell odor:",
+  "sound_phrase": "an alarm clock ringing",
+  "final_phase": "goal_navigation",
+  "vis_phrase_source": "sound_similarity",
+  "clap_active": true,
+  "doa_offset_deg": 0.0,
+  "doa_ccw": false,
+  "L0_map": 20.0,
+  "L0_posterior": [
+    0.2,
+    0.2,
+    0.2,
+    0.2,
+    0.2
+  ],
+  "L0_pegged": false,
+  "has_sound_level": true
+}

@@ -39,6 +39,8 @@ BayesianAgent.prob_map and the Dirichlet object map.
 
 import os
 import math
+import tempfile
+import wave
 import numpy as np
 
 # ============================================================= CONFIG
@@ -616,7 +618,38 @@ def clap_is_active():
     return _CLAP_ACTIVE
 
 
-def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM):
+def _write_temp_wav(waveform, sample_rate):
+    """Write a mono int16 clip to a fresh temp .wav file; caller deletes it.
+
+    A throwaway file, not a cache key: audio_array queries carry live mic
+    audio that is different on every call, so unlike ('audio', path) -- a
+    stable path to a fixed clip on disk -- there is nothing here worth
+    reusing across calls, and a numpy array can't be a dict key anyway (see
+    class_sound_similarity's use_cache handling below).
+    """
+    waveform = np.asarray(waveform)
+    if waveform.ndim > 1:
+        waveform = waveform.reshape(-1)
+    if waveform.dtype != np.int16:
+        # Accept float in [-1, 1] as well as already-int16 PCM.
+        if np.issubdtype(waveform.dtype, np.floating):
+            waveform = np.clip(waveform, -1.0, 1.0)
+            waveform = (waveform * 32767.0).astype(np.int16)
+        else:
+            waveform = waveform.astype(np.int16)
+
+    fd, path = tempfile.mkstemp(suffix='.wav', prefix='clap_mic_')
+    os.close(fd)
+    with wave.open(path, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)          # int16
+        wf.setframerate(int(sample_rate))
+        wf.writeframes(waveform.tobytes())
+    return path
+
+
+def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM,
+                           use_cache=True):
     """Cosine similarity between a heard sound and each YOLO class name.
 
     CLAP puts audio and text in one shared space, so an audio clip can be
@@ -626,10 +659,31 @@ def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM
 
     Parameters
     ----------
-    sound_query : tuple[str, str]
-        ('audio', path) or ('text', label), as returned by SoundSource.query().
+    sound_query : tuple[str, object]
+        ('audio', path)                     -- a clip already on disk
+                                               (simulation SoundSource.query()).
+        ('text', label)                      -- a text description, embedded
+                                               as text (no waveform involved).
+        ('audio_array', (waveform, sr))      -- raw mic PCM (mono int16 or
+                                               float32 in [-1, 1]) plus its
+                                               sample rate, e.g. a hardware
+                                               DOA-window mic buffer. Written
+                                               to a throwaway wav and embedded
+                                               exactly like ('audio', path),
+                                               so this is genuine audio
+                                               grounding of the live waveform,
+                                               not text matching against
+                                               whatever sound_phrase happens
+                                               to be set to.
     classes : list[str]
         Class names, in the canonical CLASSES order of the object map.
+    use_cache : bool
+        Memoize by (kind, payload, classes, clip_negative). Forced off for
+        'audio_array' regardless of this argument: the payload is a live
+        waveform that differs every call (so a cache would either never hit
+        or -- worse -- serve a stale similarity vector from a previous
+        listening window), and a numpy array can't be hashed into a dict key
+        in the first place.
 
     Returns
     -------
@@ -637,34 +691,52 @@ def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM
         (K,) similarity vector aligned with `classes`.
     """
     kind, payload = sound_query
-    key = (kind, payload, tuple(classes), clip_negative)
-    if key in _CLAP_CACHE:
+    use_cache = use_cache and kind != 'audio_array'
+    key = (kind, payload, tuple(classes), clip_negative) if use_cache else None
+    if use_cache and key in _CLAP_CACHE:
         return _CLAP_CACHE[key]
 
     # Class names are terse labels; a short prompt gives CLAP better grounding.
     prompts = [f"the sound of a {c}" for c in classes]
 
     clap = _load_clap()
+    tmp_path = None
     if clap is not None:
         try:
             cls_emb = clap.get_text_embedding(prompts, use_tensor=False)
             if kind == 'audio':
                 q_emb = clap.get_audio_embedding_from_filelist([payload], use_tensor=False)
+            elif kind == 'audio_array':
+                waveform, sr = payload
+                tmp_path = _write_temp_wav(waveform, sr)
+                q_emb = clap.get_audio_embedding_from_filelist([tmp_path], use_tensor=False)
             else:
                 q_emb = clap.get_text_embedding([payload], use_tensor=False)
             s = _cos(np.asarray(q_emb)[0][None, :], np.asarray(cls_emb))[0]
         except Exception as e:
             print(f"[sound] CLAP embedding failed ({e}); falling back to SBERT.")
             s = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
     else:
         s = None
 
     if s is None:
         # Fallback keeps the pipeline runnable without the CLAP checkpoint.
-        # Text-only, so an audio path degrades to its filename stem.
+        # Text-only, so an audio path (file or live array) degrades to a
+        # generic description rather than analysing the waveform.
         from .visionFunction import model as _sbert
         from sentence_transformers import util as _util
-        text = payload if kind == 'text' else os.path.splitext(os.path.basename(payload))[0]
+        if kind == 'text':
+            text = payload
+        elif kind == 'audio':
+            text = os.path.splitext(os.path.basename(payload))[0]
+        else:  # 'audio_array' -- no filename to fall back to
+            text = "an unidentified sound"
         q = _sbert.encode(text, convert_to_tensor=True)
         c = _sbert.encode(prompts, convert_to_tensor=True)
         s = _util.cos_sim(q, c)[0].cpu().numpy()
@@ -680,7 +752,8 @@ def class_sound_similarity(sound_query, classes, clip_negative=CLIP_NEGATIVE_SIM
         s = zero_empty_similarity(s)
     except Exception:
         pass
-    _CLAP_CACHE[key] = s
+    if use_cache:
+        _CLAP_CACHE[key] = s
     return s
 
 

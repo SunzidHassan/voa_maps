@@ -448,12 +448,32 @@ def auditionBranch(node):
                                   node.robot_map_posX, node.robot_map_posY),
             float(np.mean(levels)), node.snd_sigma_db)
 
-    if node.sound_sim is None:
+    # Genuine audio grounding: embed the mic waveform actually captured
+    # during THIS listening window (paired 1:1 with the DOA burst above,
+    # same window) and compare it to the class-name prompts. Recomputed
+    # every window on purpose -- unlike a fixed sound_phrase description,
+    # the live clip changes take by take, so caching the first result would
+    # freeze the semantic vector to whatever happened to be heard once.
+    get_clip = getattr(node, 'get_mic_clip', None)
+    clip = get_clip() if callable(get_clip) else None
+    if clip is not None and len(clip) > 0:
+        try:
+            node.sound_sim = sf.class_sound_similarity(
+                ('audio_array', (clip, getattr(node, 'audio_sample_rate', 16000))),
+                vf.CLASSES, use_cache=False)
+        except Exception as e:
+            node.get_logger().warn(f"CLAP mic-embedding failed: {e}")
+    elif node.sound_sim is None:
+        # No mic samples were captured this window (e.g. the audio stream
+        # never opened, or this is the very first window and it came back
+        # empty) -- fall back once to the text description so downstream
+        # code isn't left with sound_sim=None indefinitely. Once a real clip
+        # is captured on a later window, that branch above takes over.
         try:
             node.sound_sim = sf.class_sound_similarity(('text', node.sound_phrase),
                                                         vf.CLASSES)
         except Exception as e:
-            node.get_logger().warn(f"CLAP similarity failed: {e}")
+            node.get_logger().warn(f"CLAP text-fallback similarity failed: {e}")
     return len(burst)
 
 
