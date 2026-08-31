@@ -461,6 +461,19 @@ def auditionBranch(node):
             node.sound_sim = sf.class_sound_similarity(
                 ('audio_array', (clip, getattr(node, 'audio_sample_rate', 16000))),
                 vf.CLASSES, use_cache=False)
+            node.sound_sim_kind = 'audio_array'
+            node.sound_sim_n_samples = int(len(clip))
+            # Printed every window so "is CLAP actually hearing X" is
+            # answerable straight from the console, not inferred from which
+            # code path is supposed to be running.
+            order = np.argsort(-node.sound_sim)
+            top = ", ".join(f"{vf.CLASSES[i]}={node.sound_sim[i]:.3f}"
+                            for i in order[:3])
+            dur_s = node.sound_sim_n_samples / float(
+                getattr(node, 'audio_sample_rate', 16000))
+            node.get_logger().info(
+                f"    CLAP mic embedding: {node.sound_sim_n_samples} samples "
+                f"({dur_s:.2f}s) vs {len(vf.CLASSES)} classes -> top: {top}")
         except Exception as e:
             node.get_logger().warn(f"CLAP mic-embedding failed: {e}")
     elif node.sound_sim is None:
@@ -468,12 +481,21 @@ def auditionBranch(node):
         # never opened, or this is the very first window and it came back
         # empty) -- fall back once to the text description so downstream
         # code isn't left with sound_sim=None indefinitely. Once a real clip
-        # is captured on a later window, that branch above takes over.
+        # is captured on a later window, the branch above takes over and
+        # sound_sim_kind flips to 'audio_array'.
         try:
             node.sound_sim = sf.class_sound_similarity(('text', node.sound_phrase),
                                                         vf.CLASSES)
+            node.sound_sim_kind = 'text_fallback'
+            node.get_logger().warn(
+                f"    no mic clip this window -- sound_sim from TEXT "
+                f"'{node.sound_phrase}', NOT audio")
         except Exception as e:
             node.get_logger().warn(f"CLAP text-fallback similarity failed: {e}")
+    elif clip is not None:
+        # clip exists but is length 0 -- distinct from "no clip object at
+        # all" (audio stream simply not open), worth its own line.
+        node.get_logger().warn("    mic clip was empty (0 samples) this window")
     return len(burst)
 
 

@@ -637,6 +637,10 @@ class VAORobuddy(Node):
         self.objectMap = self.soundLog = None
         self.olfHyp = self.sndHyp = None
         self.sound_sim = None
+        # Which branch last (re)computed sound_sim, and how many raw mic
+        # samples it saw -- see the comment on sound_sim_kind in save_data().
+        self.sound_sim_kind = None
+        self.sound_sim_n_samples = None
         self.p_vis = self.p_olf = self.p_snd = self.p_fused = None
         self.H_max = 1.0
         self.n_depth_rejected = 0
@@ -1613,6 +1617,20 @@ class VAORobuddy(Node):
                     # at all -- this makes it explicit.
                     vis_phrase_source=getattr(self, 'vis_phrase_source', None),
                     clap_active=sf.clap_is_active(),
+                    # vis_phrase_source only says a sound_sim array EXISTS,
+                    # not how the most recent one was produced. This is the
+                    # actual answer to "did CLAP embed the live mic waveform
+                    # this run, or degrade to text-vs-text matching against
+                    # sound_phrase": 'audio_array' means yes, genuinely heard;
+                    # 'text_fallback' means no clip was ever captured and it
+                    # never got past the bootstrap fallback; None means
+                    # audition never ran at all (use_A off, or crashed before
+                    # its first window).
+                    sound_sim_kind=getattr(self, 'sound_sim_kind', None),
+                    sound_sim_n_samples=getattr(self, 'sound_sim_n_samples', None),
+                    sound_sim_by_class=(
+                        {c: float(v) for c, v in zip(vf.CLASSES, self.sound_sim)}
+                        if getattr(self, 'sound_sim', None) is not None else None),
                     doa_offset_deg=DOA_OFFSET_DEG, doa_ccw=DOA_CCW)
         if self.olfHyp is not None:
             meta['q_s_map'] = float(np.exp(self.olfHyp.map_value()))
